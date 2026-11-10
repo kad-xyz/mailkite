@@ -193,7 +193,8 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 			order = append(order, mb.AccountUUID)
 		}
 		a.Mailboxes = append(a.Mailboxes, mb)
-		if mb.Role != RoleTrash && mb.Role != RoleJunk {
+		// All Mail repeats every other mailbox of a Gmail account; skip it to avoid double counts
+		if mb.Role != RoleTrash && mb.Role != RoleJunk && mb.Role != RoleAll {
 			c := counts[mb.ID]
 			a.Messages += c.n
 			a.Unread += c.unread
@@ -428,7 +429,11 @@ func (s *Store) Senders(ctx context.Context, f Filter, minCount int) ([]SenderGr
 	seen := map[string]bool{}
 	idx := map[string]int{}
 	var groups []SenderGroup
-	err := s.scan(ctx, f, func(sm Summary, _ Mailbox) bool {
+	byDefault := f.Role == "" && f.Mailbox == ""
+	err := s.scan(ctx, f, func(sm Summary, mb Mailbox) bool {
+		if byDefault && (mb.Role == RoleSent || mb.Role == RoleDrafts) {
+			return true // our own addresses, not senders
+		}
 		k := dedupKey(sm)
 		if seen[k] {
 			return true

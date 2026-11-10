@@ -256,3 +256,37 @@ func TestFindLikeEscape(t *testing.T) {
 		t.Fatalf("%+v err=%v", items, err)
 	}
 }
+
+func TestAccountsSkipAllMailCounts(t *testing.T) {
+	f := testfixture.New(t)
+	f.AddAccount("G", "Gmail", "IMAP")
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://G/%5BGmail%5D/All%20Mail", MessageID: "<a@x>", Subject: "s"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://G/INBOX", MessageID: "<a@x>", Subject: "s"})
+	s := openFix(t, f)
+	acc, err := s.Accounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acc) != 1 || acc[0].Messages != 1 || acc[0].Unread != 1 {
+		t.Errorf("All Mail double-counted: %+v", acc)
+	}
+}
+
+func TestSendersDefaultSkipsSentAndDrafts(t *testing.T) {
+	f := testfixture.New(t)
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "in@x.com", Subject: "i"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Sent%20Messages", From: "me@x.com", Subject: "s"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Drafts", From: "me@x.com", Subject: "d"})
+	s := openFix(t, f)
+	g, err := s.Senders(ctx, Filter{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(g) != 1 || g[0].Address != "in@x.com" {
+		t.Errorf("default: %+v", g)
+	}
+	g, err = s.Senders(ctx, Filter{Role: RoleSent}, 0)
+	if err != nil || len(g) != 1 || g[0].Address != "me@x.com" {
+		t.Errorf("explicit sent: %+v %v", g, err)
+	}
+}
