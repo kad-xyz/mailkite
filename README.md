@@ -1,4 +1,20 @@
-# mailkite
+<p align="center">
+  <img src=".github/logo.svg" width="112" height="112" alt="mailkite logo">
+</p>
+
+<h1 align="center">mailkite</h1>
+
+<p align="center">
+  <b>A fast, token-lean MCP server for Apple Mail on macOS</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/kad-xyz/mailkite/releases/latest"><img src="https://img.shields.io/github/v/release/kad-xyz/mailkite?color=6366F1" alt="Release"></a>
+  <img src="https://img.shields.io/badge/macOS-Apple%20Mail-38BDF8?logo=apple&logoColor=white" alt="macOS">
+  <img src="https://img.shields.io/github/go-mod/go-version/kad-xyz/mailkite?color=00ADD8&logo=go&logoColor=white" alt="Go version">
+  <img src="https://img.shields.io/badge/MCP-stdio-111827" alt="MCP stdio">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/kad-xyz/mailkite?color=22C55E" alt="License: MIT"></a>
+</p>
 
 A small, fast MCP server for Apple Mail on macOS. It reads Mail's own local data directly, so searches take a fraction of a millisecond on a small mailbox (measured on about 110 messages), the process uses no CPU while idle, and the tool descriptions cost very few tokens.
 
@@ -37,7 +53,14 @@ mailkite is not the smallest or the lowest-memory option; its advantages here ar
 
 ## Install
 
-With a recent Go toolchain (see `go.mod`):
+Download a prebuilt binary (Apple silicon or Intel) from the [latest release](https://github.com/kad-xyz/mailkite/releases/latest):
+
+```sh
+curl -L -o mailkite https://github.com/kad-xyz/mailkite/releases/latest/download/mailkite-darwin-arm64   # or mailkite-darwin-amd64
+chmod +x mailkite && xattr -d com.apple.quarantine mailkite 2>/dev/null; mv mailkite /usr/local/bin/
+```
+
+Or with a recent Go toolchain (see `go.mod`):
 
 ```sh
 go install github.com/kad-xyz/mailkite/cmd/mailkite@latest

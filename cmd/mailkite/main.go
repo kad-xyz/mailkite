@@ -15,7 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const version = "dev"
+var version = "dev" // set at release build time via -ldflags "-X main.version=..."
 
 // tuneRuntime trims the Go runtime for a server that answers one stdio request at a time:
 // two Ps instead of one per core (fewer per-P caches, GC workers and threads), and GC at
