@@ -67,9 +67,9 @@ func (h *handlers) stateDir() (string, error) {
 	return d, nil
 }
 
-// hiddenFilter returns a Filter.Skip that hides messages mailkite erased but Mail's
-// index still lists. With unhide, keys Mail no longer has at all are dropped from the
-// state first (only those keys are looked up). nil when nothing is hidden.
+// hiddenFilter returns a Filter.Skip that hides the rows (ROWIDs) mailkite erased
+// but Mail's index still lists. With unhide, rows Mail no longer has are dropped
+// from the state first (only those ROWIDs are looked up). nil when nothing is hidden.
 func (h *handlers) hiddenFilter(ctx context.Context, st *maildata.Store, unhide bool) func(maildata.Summary) bool {
 	state, err := h.state.get()
 	if err != nil {
@@ -80,16 +80,16 @@ func (h *handlers) hiddenFilter(ctx context.Context, st *maildata.Store, unhide 
 		return nil
 	}
 	if unhide {
-		keys := make([]maildata.MsgKey, 0, len(hidden))
+		rows := make([]int64, 0, len(hidden))
 		for k := range hidden {
-			keys = append(keys, maildata.MsgKey{Account: k.Account, MessageID: k.MessageID})
+			rows = append(rows, k.RowID)
 		}
-		if present, err := st.PresentKeys(ctx, keys); err == nil {
-			gone := map[string][]string{}
-			for _, k := range keys {
-				if !present[k] {
-					gone[k.Account] = append(gone[k.Account], k.MessageID)
-					delete(hidden, safety.HiddenKey{Account: k.Account, MessageID: k.MessageID})
+		if present, err := st.PresentRows(ctx, rows); err == nil {
+			gone := map[string][]int64{}
+			for k := range hidden {
+				if !present[k.RowID] {
+					gone[k.Account] = append(gone[k.Account], k.RowID)
+					delete(hidden, k)
 				}
 			}
 			for acc, ids := range gone {
@@ -101,8 +101,8 @@ func (h *handlers) hiddenFilter(ctx context.Context, st *maildata.Store, unhide 
 		}
 	}
 	return func(sm maildata.Summary) bool {
-		_, ok := hidden[safety.HiddenKey{Account: sm.AccountUUID, MessageID: sm.MessageID}]
-		return ok && sm.MessageID != ""
+		_, ok := hidden[safety.HiddenKey{Account: sm.AccountUUID, RowID: sm.ID}]
+		return ok
 	}
 }
 

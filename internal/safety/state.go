@@ -61,30 +61,36 @@ func OpenState(dir string) (*State, error) {
 	return &State{db: db, logPath: filepath.Join(dir, "actions.log")}, nil
 }
 
-// initHidden creates the hidden table keyed by (account, message_id). An older
-// table without the account column is only a view cache: it is dropped.
+// initHidden creates the hidden table keyed by (account, rowid): the Mail account
+// UUID and the ROWID of the message in Mail's index. It is only a view cache, so an
+// older table (keyed by Message-ID, or without the account) is dropped.
 func initHidden(db *sql.DB) error {
 	var n int
-	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('hidden') WHERE name = 'account'`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('hidden') WHERE name IN ('account', 'rowid')`).Scan(&n); err != nil {
 		return err
 	}
-	if n == 0 {
+	if n != 2 {
 		if _, err := db.Exec(`DROP TABLE IF EXISTS hidden`); err != nil {
 			return err
 		}
 	}
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS hidden(account TEXT NOT NULL, message_id TEXT NOT NULL, at INTEGER,
-		PRIMARY KEY(account, message_id))`)
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS hidden(account TEXT NOT NULL, rowid INTEGER NOT NULL, at INTEGER,
+		PRIMARY KEY(account, rowid))`)
 	return err
 }
 
-// HiddenKey is one hidden message: the Mail account UUID and the Message-ID.
-type HiddenKey struct{ Account, MessageID string }
+// HiddenKey is one hidden message: the Mail account UUID and the message's ROWID
+// in Mail's index. Copies of the same Message-ID are separate rows, so hiding one
+// never hides another.
+type HiddenKey struct {
+	Account string
+	RowID   int64
+}
 
 // Close closes the database.
 func (s *State) Close() error { return s.db.Close() }
 
-func (s *State) each(query, account string, ids []string, args func(id string) []any) error {
+func (s *State) each(query, account string, rowids []int64, args func(id int64) []any) error {
 	if strings.TrimSpace(account) == "" {
 		return errors.New("hidden: empty account")
 	}
@@ -98,8 +104,8 @@ func (s *State) each(query, account string, ids []string, args func(id string) [
 		return err
 	}
 	defer st.Close()
-	for _, id := range ids {
-		if id == "" {
+	for _, id := range rowids {
+		if id <= 0 {
 			continue
 		}
 		if _, err := st.Exec(args(id)...); err != nil {
@@ -109,22 +115,22 @@ func (s *State) each(query, account string, ids []string, args func(id string) [
 	return tx.Commit()
 }
 
-// Hide records Message-IDs of one Mail account (UUID) as hidden at time at.
-// Empty IDs are skipped.
-func (s *State) Hide(account string, messageIDs []string, at time.Time) error {
-	return s.each(`INSERT OR REPLACE INTO hidden(account, message_id, at) VALUES(?, ?, ?)`, account, messageIDs,
-		func(id string) []any { return []any{account, id, at.Unix()} })
+// Hide records ROWIDs of one Mail account (UUID) as hidden at time at. Zero and
+// negative ROWIDs are skipped.
+func (s *State) Hide(account string, rowids []int64, at time.Time) error {
+	return s.each(`INSERT OR REPLACE INTO hidden(account, rowid, at) VALUES(?, ?, ?)`, account, rowids,
+		func(id int64) []any { return []any{account, id, at.Unix()} })
 }
 
-// Unhide forgets hidden Message-IDs of one account.
-func (s *State) Unhide(account string, messageIDs []string) error {
-	return s.each(`DELETE FROM hidden WHERE account = ? AND message_id = ?`, account, messageIDs,
-		func(id string) []any { return []any{account, id} })
+// Unhide forgets hidden ROWIDs of one account.
+func (s *State) Unhide(account string, rowids []int64) error {
+	return s.each(`DELETE FROM hidden WHERE account = ? AND rowid = ?`, account, rowids,
+		func(id int64) []any { return []any{account, id} })
 }
 
-// Hidden returns the set of hidden (account, Message-ID) pairs.
+// Hidden returns the set of hidden (account, ROWID) pairs.
 func (s *State) Hidden(ctx context.Context) (map[HiddenKey]struct{}, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT account, message_id FROM hidden`)
+	rows, err := s.db.QueryContext(ctx, `SELECT account, rowid FROM hidden`)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +138,7 @@ func (s *State) Hidden(ctx context.Context) (map[HiddenKey]struct{}, error) {
 	out := map[HiddenKey]struct{}{}
 	for rows.Next() {
 		var k HiddenKey
-		if err := rows.Scan(&k.Account, &k.MessageID); err != nil {
+		if err := rows.Scan(&k.Account, &k.RowID); err != nil {
 			return nil, err
 		}
 		out[k] = struct{}{}

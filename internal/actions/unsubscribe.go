@@ -249,7 +249,7 @@ func parseMailto(raw string) (to, subject string, err error) {
 // newestFrom finds the newest message (with a Message-ID, not erased by mailkite)
 // whose sender matches.
 func (e *Engine) newestFrom(ctx context.Context, needle string, match func(string) bool, hidden map[safety.HiddenKey]struct{}) (maildata.Summary, maildata.Mailbox, bool, error) {
-	f := maildata.Filter{From: needle, Limit: pageSize}
+	f := maildata.Filter{From: needle, Limit: pageSize, Skip: skipHidden(hidden)}
 	for off := 0; off < maxCleanup; off += pageSize {
 		f.Offset = off
 		items, more, err := e.Store.Find(ctx, f)
@@ -267,7 +267,7 @@ func (e *Engine) newestFrom(ctx context.Context, needle string, match func(strin
 			if err != nil {
 				return maildata.Summary{}, maildata.Mailbox{}, false, err
 			}
-			if isHidden(hidden, mb.AccountUUID, got.MessageID) {
+			if isHidden(hidden, mb.AccountUUID, got.ID) {
 				continue
 			}
 			return got, mb, true, nil

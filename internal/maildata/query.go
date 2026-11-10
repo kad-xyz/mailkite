@@ -32,8 +32,12 @@ type Filter struct {
 	IDs              []int64
 	Limit, Offset    int
 	// Skip, when set, drops matching messages before dedup and paging (it sees
-	// Summary.AccountUUID and MessageID); used to hide erased messages.
+	// Summary.ID and AccountUUID); used to hide erased messages by ROWID.
 	Skip func(Summary) bool
+	// DedupKey, when set, replaces the key that collapses copies of one message
+	// (default: account and Message-ID). Copies with different keys are listed
+	// separately.
+	DedupKey func(Summary, Mailbox) string
 }
 
 // Summary is the index-level description of one message.
@@ -364,11 +368,20 @@ rowLoop:
 	return rows.Err()
 }
 
-// dedupKey collapses copies of one message within an account (Gmail's INBOX and
+// DedupKey collapses copies of one message within an account (Gmail's INBOX and
 // All Mail); the same Message-ID in two accounts is two messages.
-func dedupKey(sm Summary, mb Mailbox) string {
+func DedupKey(sm Summary, mb Mailbox) string {
 	if sm.MessageID != "" {
 		return "m:" + mb.AccountUUID + "\x00" + sm.MessageID
+	}
+	return fmt.Sprintf("r:%d", sm.ID)
+}
+
+// MailboxDedupKey collapses copies only within one mailbox of an account: copies
+// in two mailboxes are two messages.
+func MailboxDedupKey(sm Summary, mb Mailbox) string {
+	if sm.MessageID != "" {
+		return "m:" + mb.AccountUUID + "\x00" + mb.Name + "\x00" + sm.MessageID
 	}
 	return fmt.Sprintf("r:%d", sm.ID)
 }
@@ -382,8 +395,12 @@ func (s *Store) Find(ctx context.Context, f Filter) (items []Summary, more bool,
 	}
 	var uniq []entry
 	pos := map[string]int{}
+	key := f.DedupKey
+	if key == nil {
+		key = DedupKey
+	}
 	err = s.scan(ctx, f, func(sm Summary, mb Mailbox) bool {
-		k := dedupKey(sm, mb)
+		k := key(sm, mb)
 		if i, ok := pos[k]; ok {
 			if uniq[i].isAll && mb.Role != RoleAll {
 				uniq[i] = entry{sm, false}
@@ -443,7 +460,7 @@ func (s *Store) Senders(ctx context.Context, f Filter, minCount int) ([]SenderGr
 		if byDefault && (mb.Role == RoleSent || mb.Role == RoleDrafts) {
 			return true // our own addresses, not senders
 		}
-		k := dedupKey(sm, mb)
+		k := DedupKey(sm, mb)
 		if seen[k] {
 			return true
 		}

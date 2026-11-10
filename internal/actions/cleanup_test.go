@@ -572,7 +572,7 @@ func TestExecuteNotFoundOnServer(t *testing.T) {
 	v := newEnv(t)
 	srv := v.srv["a@icloud.example"]
 	v.add(uuidA, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
-	_, gone := v.add(uuidA, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{noServer: true})
+	gone, _ := v.add(uuidA, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{noServer: true})
 	v.add(uuidA, "Shop <news@shop.example>", "Скидки 3", "Распродажа", msgOpt{})
 	p := eraseShop(v)
 	rep, err := v.e.Execute(ctxT(t), p.PlanID)
@@ -589,7 +589,7 @@ func TestExecuteNotFoundOnServer(t *testing.T) {
 		t.Fatalf("archive %d: a message not on the server is not archived", countEml(v.e.Archive.Dir))
 	}
 	h, _ := v.e.State.Hidden(ctxT(t))
-	if _, ok := h[safety.HiddenKey{Account: uuidA, MessageID: gone}]; ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidA, RowID: gone}]; ok {
 		t.Fatal("not-found message must not be hidden")
 	}
 }
@@ -659,8 +659,8 @@ func TestExecuteNoPasswordIsolated(t *testing.T) {
 
 func TestExecuteHidesErased(t *testing.T) {
 	v := newEnv(t)
-	_, id1 := v.add(uuidA, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
-	_, id2 := v.add(uuidA, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
+	id1, _ := v.add(uuidA, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
+	id2, _ := v.add(uuidA, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
 	rep, err := v.e.Execute(ctxT(t), eraseShop(v).PlanID)
 	if err != nil || rep.Done != 2 {
 		t.Fatalf("rep %+v err %v", rep, err)
@@ -669,10 +669,10 @@ func TestExecuteHidesErased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := h[safety.HiddenKey{Account: uuidA, MessageID: id1}]; !ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidA, RowID: id1}]; !ok {
 		t.Fatalf("hidden %v", h)
 	}
-	if _, ok := h[safety.HiddenKey{Account: uuidA, MessageID: id2}]; !ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidA, RowID: id2}]; !ok {
 		t.Fatalf("hidden %v", h)
 	}
 	// Hidden messages are not offered again.
@@ -829,8 +829,8 @@ func TestMarkLargeNeedsPlan(t *testing.T) {
 
 func TestPOPCountsOnlyReportedIDs(t *testing.T) {
 	v := newEnv(t)
-	_, id1 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
-	_, id2 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
+	r1, id1 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
+	r2, _ := v.add(uuidP, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
 	// Mail found two copies of id1 and none of id2; it also names an id never asked for.
 	v.pop.reply = func([]string) POPResult { return POPResult{Deleted: []string{norm(id1), id1, "stranger@x"}} }
 	rep, err := v.e.Execute(ctxT(t), eraseShop(v).PlanID)
@@ -838,10 +838,10 @@ func TestPOPCountsOnlyReportedIDs(t *testing.T) {
 		t.Fatalf("rep %+v err %v", rep, err)
 	}
 	h, _ := v.e.State.Hidden(ctxT(t))
-	if _, ok := h[safety.HiddenKey{Account: uuidP, MessageID: id1}]; !ok || len(h) != 1 {
+	if _, ok := h[safety.HiddenKey{Account: uuidP, RowID: r1}]; !ok || len(h) != 1 {
 		t.Fatalf("hidden %v", h)
 	}
-	if _, ok := h[safety.HiddenKey{Account: uuidP, MessageID: id2}]; ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidP, RowID: r2}]; ok {
 		t.Fatal("id2 was not deleted")
 	}
 }

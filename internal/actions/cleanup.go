@@ -207,8 +207,29 @@ var errTooMany = func() error {
 	return fmt.Errorf("more than %d messages match; narrow the filter (sender, dates, mailbox)", maxCleanup)
 }
 
-// collect pages through every match of r (deduplicated), at most maxCleanup.
-func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, error) {
+// copyKey decides which copies of one Message-ID are separate targets. On a
+// non-Gmail IMAP account each mailbox's copy is its own message: erasing one leaves
+// the others. On Gmail (labels of one message) and POP (Mail deletes every copy)
+// the copies of an account are one message.
+func (e *Engine) copyKey(sm maildata.Summary, mb maildata.Mailbox) string {
+	if acc, ok := e.Cfg.ByMailUUID(mb.AccountUUID); ok && acc.Kind != "pop" && !acc.Gmail {
+		return maildata.MailboxDedupKey(sm, mb)
+	}
+	return maildata.DedupKey(sm, mb)
+}
+
+// skipHidden is a Filter.Skip for rows mailkite erased (nil when none): hidden
+// rows drop out before copies are collapsed, so a surviving copy is still found.
+func skipHidden(h map[safety.HiddenKey]struct{}) func(maildata.Summary) bool {
+	if len(h) == 0 {
+		return nil
+	}
+	return func(sm maildata.Summary) bool { return isHidden(h, sm.AccountUUID, sm.ID) }
+}
+
+// collect pages through every visible match of r (deduplicated by copyKey), at
+// most maxCleanup.
+func (e *Engine) collect(ctx context.Context, r CleanupRequest, hidden map[safety.HiddenKey]struct{}) ([]candidate, error) {
 	type spec struct {
 		needle string
 		match  func(string) bool
@@ -240,6 +261,8 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 	for _, sp := range specs {
 		f := r.Filter
 		f.Limit = pageSize
+		f.DedupKey = e.copyKey
+		f.Skip = skipHidden(hidden)
 		if sp.match != nil {
 			f.From = sp.needle
 		}
@@ -272,10 +295,7 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 				if err != nil {
 					return nil, err
 				}
-				k := fmt.Sprintf("r:%d", sm.ID)
-				if sm.MessageID != "" {
-					k = "m:" + mb.AccountUUID + "\x00" + sm.MessageID
-				}
+				k := e.copyKey(sm, mb)
 				if seen[k] {
 					continue
 				}
@@ -406,11 +426,11 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 	if !hasConstraint(r) {
 		return Preview{}, errors.New("cleanup needs senders or a filter (from, subject, mailbox, dates, unread...); it never acts on all mail")
 	}
-	cands, err := e.collect(ctx, r)
+	hidden, err := e.hidden(ctx)
 	if err != nil {
 		return Preview{}, err
 	}
-	hidden, err := e.hidden(ctx)
+	cands, err := e.collect(ctx, r, hidden)
 	if err != nil {
 		return Preview{}, err
 	}
@@ -418,7 +438,7 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 	b := newBuilder()
 	allow := idSet(r.AllowProtected)
 	for _, c := range cands {
-		if isHidden(hidden, c.mb.AccountUUID, c.sm.MessageID) {
+		if isHidden(hidden, c.mb.AccountUUID, c.sm.ID) {
 			continue
 		}
 		if err := e.addChecked(ctx, b, &p, c.sm, c.mb, r.Action, allow); err != nil {
@@ -450,11 +470,8 @@ func idSet(ids []int64) map[int64]bool {
 	return m
 }
 
-func isHidden(h map[safety.HiddenKey]struct{}, account, messageID string) bool {
-	if messageID == "" {
-		return false
-	}
-	_, ok := h[safety.HiddenKey{Account: account, MessageID: messageID}]
+func isHidden(h map[safety.HiddenKey]struct{}, account string, rowid int64) bool {
+	_, ok := h[safety.HiddenKey{Account: account, RowID: rowid}]
 	return ok
 }
 
@@ -523,7 +540,7 @@ func (e *Engine) BuildMark(ctx context.Context, r MarkRequest) (Preview, bool, e
 		if err != nil {
 			return Preview{}, false, err
 		}
-		if isHidden(hidden, mb.AccountUUID, sm.MessageID) {
+		if isHidden(hidden, mb.AccountUUID, sm.ID) {
 			p.Skipped = append(p.Skipped, fmt.Sprintf("id %d: already erased", id))
 			continue
 		}
@@ -850,7 +867,7 @@ func (e *Engine) localRaw(id int64, mb maildata.Mailbox, messageID string) []byt
 func (e *Engine) eraseBox(ctx context.Context, conn IMAP, acc config.Account, uuid, box string, ls []located, r *result) {
 	now := e.now()
 	var targets []imapx.Target
-	idOf := map[uint32]string{}
+	idOf := map[uint32]safety.Target{}
 	unread := 0
 	for _, l := range ls {
 		sm, mb, inIndex := e.archiveSummary(ctx, uuid, l.t)
@@ -871,7 +888,7 @@ func (e *Engine) eraseBox(ctx context.Context, conn IMAP, acc config.Account, uu
 			continue
 		}
 		targets = append(targets, imapx.Target{UID: l.uid, MessageID: l.t.MessageID})
-		idOf[l.uid] = l.t.MessageID
+		idOf[l.uid] = l.t
 	}
 	if unread > 0 {
 		r.fail(unread, "archive_failed", fmt.Sprintf("%s: %d not archived, so not erased", box, unread))
@@ -894,18 +911,49 @@ func (e *Engine) eraseBox(ctx context.Context, conn IMAP, acc config.Account, uu
 	} else if err != nil {
 		r.notes = append(r.notes, box+": "+err.Error())
 	}
-	var ids []string
+	var rows []int64
 	for _, u := range res.Erased {
-		ids = append(ids, idOf[u])
+		rows = append(rows, e.erasedRows(ctx, acc, uuid, box, idOf[u], u)...)
 	}
-	e.hide(uuid, ids, now, r)
+	e.hide(uuid, rows, now, r)
 }
 
-func (e *Engine) hide(uuid string, ids []string, now time.Time, r *result) {
-	if len(ids) == 0 || e.State == nil {
+// erasedRows are the index rows to hide once the server erased uid for target t.
+// Gmail's erase removes the message from every label, so every row of that
+// Message-ID in the account goes. Elsewhere only t's own row, and only when the
+// erased UID is the one Mail remembers for it or no other row of that mailbox has
+// the same Message-ID: if in doubt a row stays visible (a later action reports it
+// not found), but a surviving copy is never hidden.
+func (e *Engine) erasedRows(ctx context.Context, acc config.Account, uuid, box string, t safety.Target, uid uint32) []int64 {
+	copies, err := e.Store.Copies(ctx, uuid, t.MessageID)
+	if acc.Gmail {
+		rows := []int64{t.ID}
+		if err == nil {
+			for _, c := range copies {
+				rows = append(rows, c.ID)
+			}
+		}
+		return rows
+	}
+	if uid == t.UID {
+		return []int64{t.ID}
+	}
+	if err != nil {
+		return nil
+	}
+	for _, c := range copies {
+		if c.Mailbox == box && c.ID != t.ID {
+			return nil
+		}
+	}
+	return []int64{t.ID}
+}
+
+func (e *Engine) hide(uuid string, rows []int64, now time.Time, r *result) {
+	if len(rows) == 0 || e.State == nil {
 		return
 	}
-	if err := e.State.Hide(uuid, ids, now); err != nil {
+	if err := e.State.Hide(uuid, rows, now); err != nil {
 		r.notes = append(r.notes, "erased messages may still show until Mail syncs: "+err.Error())
 	}
 }
@@ -923,6 +971,7 @@ func (e *Engine) runPOP(ctx context.Context, uuid string, ts []safety.Target, x 
 	}
 	now := e.now()
 	var ids []string
+	byID := map[string]safety.Target{}
 	unread := 0
 	for _, t := range ts {
 		sm, mb, inIndex := e.archiveSummary(ctx, uuid, t)
@@ -940,6 +989,7 @@ func (e *Engine) runPOP(ctx context.Context, uuid string, ts []safety.Target, x 
 			continue
 		}
 		ids = append(ids, t.MessageID)
+		byID[normID(t.MessageID)] = t
 	}
 	if unread > 0 {
 		r.fail(unread, "archive_failed", fmt.Sprintf("%d not archived, so not deleted", unread))
@@ -967,7 +1017,18 @@ func (e *Engine) runPOP(ctx context.Context, uuid string, ts []safety.Target, x 
 	left := pick(res.Left)
 	gone := pick(res.Deleted)
 	r.done += len(gone)
-	e.hide(uuid, gone, now, &r)
+	// Mail deleted every copy of these IDs in the account: hide all their rows.
+	var rows []int64
+	for _, id := range gone {
+		t := byID[normID(id)]
+		rows = append(rows, t.ID)
+		if copies, err := e.Store.Copies(ctx, uuid, t.MessageID); err == nil {
+			for _, c := range copies {
+				rows = append(rows, c.ID)
+			}
+		}
+	}
+	e.hide(uuid, rows, now, &r)
 	if len(left) > 0 {
 		r.fail(len(left), "pop_left", fmt.Sprintf("%d still in Mail after delete", len(left)))
 	}

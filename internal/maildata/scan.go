@@ -69,36 +69,29 @@ func (s *Store) LiveIDs(ctx context.Context) (map[int64]struct{}, error) {
 	return out, rows.Err()
 }
 
-// MsgKey identifies a message the way Mail's index does: Mail account UUID and
-// Message-ID header (as stored, with angle brackets).
-type MsgKey struct{ Account, MessageID string }
-
-// PresentKeys returns which of keys still have a non-deleted message in the index,
-// in any mailbox of that account (Trash included). It looks up only the given
-// Message-IDs, not the whole index.
-func (s *Store) PresentKeys(ctx context.Context, keys []MsgKey) (map[MsgKey]bool, error) {
-	out := map[MsgKey]bool{}
+// PresentRows returns which of the ROWIDs are still non-deleted messages of Mail's
+// index. It looks up only the given ROWIDs.
+func (s *Store) PresentRows(ctx context.Context, rowids []int64) (map[int64]bool, error) {
+	out := map[int64]bool{}
 	const batch = 400
-	for i := 0; i < len(keys); i += batch {
-		chunk := keys[i:min(i+batch, len(keys))]
+	for i := 0; i < len(rowids); i += batch {
+		chunk := rowids[i:min(i+batch, len(rowids))]
 		args := make([]any, len(chunk))
-		for j, k := range chunk {
-			args[j] = k.MessageID
+		for j, id := range chunk {
+			args[j] = id
 		}
-		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT g.message_id_header, b.url FROM messages m
-			JOIN message_global_data g ON g.ROWID = m.global_message_id
-			JOIN mailboxes b ON b.ROWID = m.mailbox
-			WHERE m.deleted = 0 AND g.message_id_header IN (?`+strings.Repeat(",?", len(chunk)-1)+`)`, args...)
+		rows, err := s.db.QueryContext(ctx, `SELECT ROWID FROM messages WHERE deleted = 0 AND ROWID IN (?`+
+			strings.Repeat(",?", len(chunk)-1)+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
-			var id, u sql.NullString
-			if err := rows.Scan(&id, &u); err != nil {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
 				rows.Close()
 				return nil, err
 			}
-			out[MsgKey{Account: ParseMailboxURL(0, u.String).AccountUUID, MessageID: id.String}] = true
+			out[id] = true
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -107,4 +100,38 @@ func (s *Store) PresentKeys(ctx context.Context, keys []MsgKey) (map[MsgKey]bool
 		rows.Close()
 	}
 	return out, nil
+}
+
+// Copy is one row of a message in Mail's index: its ROWID and mailbox name.
+type Copy struct {
+	ID      int64
+	Mailbox string
+}
+
+// Copies returns every non-deleted row of the account (Mail UUID) whose
+// Message-ID header is messageID (as stored, with angle brackets), in any mailbox.
+func (s *Store) Copies(ctx context.Context, account, messageID string) ([]Copy, error) {
+	if messageID == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT m.ROWID, b.ROWID, b.url FROM messages m
+		JOIN message_global_data g ON g.ROWID = m.global_message_id
+		JOIN mailboxes b ON b.ROWID = m.mailbox
+		WHERE m.deleted = 0 AND g.message_id_header = ? ORDER BY m.ROWID`, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Copy
+	for rows.Next() {
+		var id, mbID int64
+		var u sql.NullString
+		if err := rows.Scan(&id, &mbID, &u); err != nil {
+			return nil, err
+		}
+		if mb := ParseMailboxURL(mbID, u.String); mb.AccountUUID == account {
+			out = append(out, Copy{ID: id, Mailbox: mb.Name})
+		}
+	}
+	return out, rows.Err()
 }

@@ -788,3 +788,15 @@ func TestLocateMany(t *testing.T) {
 		t.Fatalf("empty: %v %v", got, err)
 	}
 }
+
+func TestLocateManyPrefersHintAmongCopies(t *testing.T) {
+	ts := startServer(t, testOptions{})
+	uids := ts.seed(t, "INBOX", msg("dup@example.com", "first"), msg("dup@example.com", "second"))
+	c := ts.dial(t)
+	for _, hint := range uids {
+		got, err := c.LocateMany(ctx(t), "INBOX", []LocateItem{{MessageID: "<dup@example.com>", UIDHint: hint}})
+		if err != nil || got["<dup@example.com>"] != hint {
+			t.Fatalf("hint %d: got %v err %v", hint, got, err)
+		}
+	}
+}
