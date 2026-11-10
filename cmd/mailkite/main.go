@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 
 	"github.com/kad-xyz/mailkite/internal/fts"
 	"github.com/kad-xyz/mailkite/internal/maildata"
@@ -15,7 +17,21 @@ import (
 
 const version = "dev"
 
+// tuneRuntime trims the Go runtime for a server that answers one stdio request at a time:
+// two Ps instead of one per core (fewer per-P caches, GC workers and threads), and GC at
+// 50% heap growth, so the heap goal is 2 MB instead of 4 MB over a ~1 MB live heap.
+// Both only change work done while a request runs; GOMAXPROCS and GOGC still override.
+func tuneRuntime() {
+	if os.Getenv("GOMAXPROCS") == "" && runtime.GOMAXPROCS(0) > 2 {
+		runtime.GOMAXPROCS(2)
+	}
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(50)
+	}
+}
+
 func main() {
+	tuneRuntime()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if err := run(ctx, os.Args[1:]); err != nil {
