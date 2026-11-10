@@ -28,15 +28,31 @@ func (h *handlers) addStatus(srv *mcp.Server) {
 			if t := st.IndexModTime(); !t.IsZero() {
 				fmt.Fprintf(&b, "mail index updated %s\n", t.Local().Format("2006-01-02 15:04"))
 			}
-			ix, err := h.index.get()
-			if err != nil {
-				return errResult(err)
+			if n, err := h.indexCount(ctx); err != nil {
+				fmt.Fprintf(&b, "search index: unavailable (%s)", shortErr(err))
+			} else {
+				fmt.Fprintf(&b, "search index: %d docs", n)
 			}
-			n, err := ix.Count(ctx)
-			if err != nil {
-				return errResult(err)
-			}
-			fmt.Fprintf(&b, "search index: %d docs", n)
 			return textResult(b.String())
 		})
+}
+
+func (h *handlers) indexCount(ctx context.Context) (int, error) {
+	ix, err := h.index.get()
+	if err != nil {
+		return 0, err
+	}
+	return ix.Count(ctx)
+}
+
+// shortErr is the innermost cause of err (after the last ": "), first line only, at most 80 bytes.
+func shortErr(err error) string {
+	s, _, _ := strings.Cut(err.Error(), "\n")
+	if i := strings.LastIndex(s, ": "); i >= 0 {
+		s = s[i+2:]
+	}
+	if len(s) > 80 {
+		s = strings.ToValidUTF8(s[:80], "") + "..."
+	}
+	return s
 }

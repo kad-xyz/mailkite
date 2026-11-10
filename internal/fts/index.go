@@ -20,6 +20,9 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// schemaVersion is stored in PRAGMA user_version; a different value rebuilds the index file.
+const schemaVersion = 1
+
 const (
 	pruneEvery   = 60 * time.Second
 	maxBodyBytes = 256 << 10
@@ -62,18 +65,16 @@ func Open(path string) (*Index, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	u := url.URL{Path: path}
-	db, err := sql.Open("sqlite", "file:"+u.EscapedPath()+"?_txlock=immediate&_pragma=busy_timeout(2000)&_pragma=journal_mode(WAL)")
+	db, err := openDB(path)
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	_, err = db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(subject, sender, recipients, body, attachments, tokenize='unicode61 remove_diacritics 2');
-CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
-CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, retried_at INTEGER NOT NULL DEFAULT 0);`)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("init index: %w", err)
+		if IsBusy(err) {
+			return nil, err // someone else holds it; do not destroy a healthy index
+		}
+		// unreadable or foreign file: the index is only a cache, start over
+		removeDB(path)
+		if db, err = openDB(path); err != nil {
+			return nil, err
+		}
 	}
 	for _, suf := range []string{"", "-wal", "-shm"} { // the index holds mail text
 		if err := os.Chmod(path+suf, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -82,6 +83,51 @@ CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, retried_at INTEGER
 		}
 	}
 	return &Index{db: db}, nil
+}
+
+// IsBusy reports whether err means another process holds the index write lock.
+func IsBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "database is locked") || strings.Contains(m, "sqlite_busy")
+}
+
+// removeDB deletes the index file and its WAL side files.
+func removeDB(path string) {
+	for _, suf := range []string{"", "-wal", "-shm"} {
+		os.Remove(path + suf)
+	}
+}
+
+// openDB opens path and makes sure it holds the current schema. A file with another
+// user_version (or tables but no version) is reported as an error so Open recreates it.
+func openDB(path string) (*sql.DB, error) {
+	u := url.URL{Path: path}
+	db, err := sql.Open("sqlite", "file:"+u.EscapedPath()+"?_txlock=immediate&_pragma=busy_timeout(2000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	fail := func(err error) (*sql.DB, error) { db.Close(); return nil, err }
+	var ver, tables int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&ver); err != nil {
+		return fail(err)
+	}
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master").Scan(&tables); err != nil {
+		return fail(err)
+	}
+	if tables > 0 && ver != schemaVersion {
+		return fail(fmt.Errorf("index schema version %d, want %d", ver, schemaVersion))
+	}
+	if _, err := db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(subject, sender, recipients, body, attachments, tokenize='unicode61 remove_diacritics 2');
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
+CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, retried_at INTEGER NOT NULL DEFAULT 0);
+PRAGMA user_version=` + strconv.Itoa(schemaVersion)); err != nil {
+		return fail(fmt.Errorf("init index: %w", err))
+	}
+	return db, nil
 }
 
 // Close closes the index.

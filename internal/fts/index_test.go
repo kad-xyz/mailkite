@@ -2,6 +2,7 @@ package fts
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"slices"
@@ -323,5 +324,77 @@ func agePending(t *testing.T, ix *Index) {
 	t.Helper()
 	if _, err := ix.db.Exec("UPDATE pending SET retried_at=0"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOpenRecreatesStaleOrCorruptIndex(t *testing.T) {
+	for name, prep := range map[string]func(path string){
+		"old layout": func(path string) {
+			db, err := sql.Open("sqlite", "file:"+path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if _, err := db.Exec("CREATE TABLE docs(a, b); INSERT INTO docs VALUES(1,2)"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"garbage": func(path string) {
+			if err := os.WriteFile(path, []byte("this is definitely not a sqlite database, just text padding padding padding padding padding padding padding padding"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "index.sqlite")
+			prep(path)
+			ix, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ix.Close()
+			f := testfixture.New(t)
+			f.AddAccount("A", "Work", "IMAP")
+			st, err := maildata.Open(maildata.Options{MailRoot: f.Root, AccountsDB: f.AccountsDB})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			id := add(f, "fresh", "freshword")
+			mustSync(t, ix, st)
+			if got := search(t, ix, "freshword"); !slices.Equal(got, []int64{id}) {
+				t.Errorf("recreated index unusable: %v", got)
+			}
+			var v int
+			if err := ix.db.QueryRow("PRAGMA user_version").Scan(&v); err != nil || v != schemaVersion {
+				t.Errorf("user_version=%d err=%v", v, err)
+			}
+		})
+	}
+}
+
+func TestSyncBusyIsDetectable(t *testing.T) {
+	f, st, ix := setup(t)
+	add(f, "x", "y")
+	var path string
+	if err := ix.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	other, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.Close()
+	tx, err := other.db.Begin() // immediate: holds the write lock
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	_, _, err = ix.Sync(ctx, st)
+	if err == nil || !IsBusy(err) {
+		t.Fatalf("Sync under a foreign write lock: err=%v busy=%v", err, IsBusy(err))
+	}
+	if _, err := ix.Search(ctx, "x", 0); err != nil {
+		t.Errorf("search must work while another process writes: %v", err)
 	}
 }

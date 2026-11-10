@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/kad-xyz/mailkite/internal/maildata"
 	"github.com/kad-xyz/mailkite/internal/testfixture"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	_ "modernc.org/sqlite"
 )
 
 var ctx = context.Background()
@@ -41,7 +43,12 @@ func setup(t *testing.T) *env {
 func connect(t *testing.T, openStore func() (*maildata.Store, error), dl string) *mcp.ClientSession {
 	t.Helper()
 	ixPath := filepath.Join(t.TempDir(), "index.sqlite")
-	srv, closeAll := NewLazy(openStore, func() (*fts.Index, error) { return fts.Open(ixPath) }, Options{DownloadDir: dl})
+	return connectIndex(t, openStore, func() (*fts.Index, error) { return fts.Open(ixPath) }, dl)
+}
+
+func connectIndex(t *testing.T, openStore func() (*maildata.Store, error), openIndex func() (*fts.Index, error), dl string) *mcp.ClientSession {
+	t.Helper()
+	srv, closeAll := NewLazy(openStore, openIndex, Options{DownloadDir: dl})
 	t.Cleanup(closeAll)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -413,5 +420,50 @@ func TestReadCacheSeesChangedFile(t *testing.T) {
 	}
 	if out, _ := e.call(t, "read", map[string]any{"id": id}); !strings.Contains(out, "second, longer body text") {
 		t.Fatalf("changed file not re-read: %q", out)
+	}
+}
+
+func TestStatusSurvivesUnavailableIndex(t *testing.T) {
+	f := testfixture.New(t)
+	f.AddAccount("A", "Work", "IMAP")
+	blocker := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(blocker, []byte("x"), 0o600)
+	cs := connectIndex(t, func() (*maildata.Store, error) {
+		return maildata.Open(maildata.Options{MailRoot: f.Root, AccountsDB: f.AccountsDB})
+	}, func() (*fts.Index, error) { return fts.Open(filepath.Join(blocker, "index.sqlite")) }, t.TempDir())
+	e := &env{f: f, cs: cs}
+	e.add("one", "x")
+	out, isErr := e.call(t, "status", nil)
+	if isErr || !strings.Contains(out, "account Work") || !strings.Contains(out, "search index: unavailable (") {
+		t.Errorf("isErr=%v %q", isErr, out)
+	}
+}
+
+func TestFindFallsBackWhenIndexBusy(t *testing.T) {
+	f := testfixture.New(t)
+	f.AddAccount("A", "Work", "IMAP")
+	ixPath := filepath.Join(t.TempDir(), "index.sqlite")
+	openStore := func() (*maildata.Store, error) {
+		return maildata.Open(maildata.Options{MailRoot: f.Root, AccountsDB: f.AccountsDB})
+	}
+	e := &env{f: f, cs: connectIndex(t, openStore, func() (*fts.Index, error) { return fts.Open(ixPath) }, t.TempDir())}
+	e.add("first", "alphaword")
+	if out, isErr := e.call(t, "find", map[string]any{"query": "alphaword"}); isErr || !strings.Contains(out, "first") {
+		t.Fatalf("baseline: %v %q", isErr, out)
+	}
+	e.add("second", "betaword")
+	db, err := sql.Open("sqlite", "file:"+ixPath+"?_txlock=immediate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	tx, err := db.Begin() // another process is indexing
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	out, isErr := e.call(t, "find", map[string]any{"query": "alphaword"})
+	if isErr || !strings.Contains(out, "first") {
+		t.Errorf("busy index: isErr=%v %q", isErr, out)
 	}
 }

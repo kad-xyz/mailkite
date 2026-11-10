@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kad-xyz/mailkite/internal/fts"
 	"github.com/kad-xyz/mailkite/internal/maildata"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -68,7 +69,8 @@ func (h *handlers) addFind(srv *mcp.Server) {
 				if err != nil {
 					return errResult(err)
 				}
-				if _, _, err := ix.Sync(ctx, st); err != nil {
+				// another process holding the write lock is indexing: search what is there
+				if _, _, err := ix.Sync(ctx, st); err != nil && !fts.IsBusy(err) {
 					return errResult(err)
 				}
 				ids, err := ix.Search(ctx, in.Query, 500)
