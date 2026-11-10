@@ -383,3 +383,20 @@ func TestSavePartialAttachments(t *testing.T) {
 		t.Errorf("missing external: %v %q", isErr, out)
 	}
 }
+
+func TestReadCacheSeesChangedFile(t *testing.T) {
+	e := setup(t)
+	id := e.add("cached", "first body text")
+	if out, _ := e.call(t, "read", map[string]any{"id": id}); !strings.Contains(out, "first body text") {
+		t.Fatalf("first read: %q", out)
+	}
+	raw := "From: a@x.com\r\nSubject: cached\r\n\r\nsecond, longer body text\r\n"
+	for _, p := range globEmlx(t, e.f.Root) {
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("%d\n%s<plist/>", len(raw), raw)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, _ := e.call(t, "read", map[string]any{"id": id}); !strings.Contains(out, "second, longer body text") {
+		t.Fatalf("changed file not re-read: %q", out)
+	}
+}

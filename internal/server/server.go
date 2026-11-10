@@ -49,6 +49,7 @@ type handlers struct {
 	store *lazy[*maildata.Store]
 	index *lazy[*fts.Index]
 	opts  Options
+	reads readCache
 }
 
 // Close releases whatever has been opened.

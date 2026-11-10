@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kad-xyz/mailkite/internal/maildata"
 	"github.com/kad-xyz/mailkite/internal/message"
@@ -57,25 +60,105 @@ func (h *handlers) load(ctx context.Context, id int64) (*loaded, error) {
 	return l, nil
 }
 
+// parsed is what read needs from one .emlx file.
+type parsed struct {
+	m   *message.Message
+	ex  func() message.Extracted // codes and links, computed on the first page only
+	hdr string                   // raw header block, CRLF turned into LF
+}
+
+// readCache keeps the last parsed message, so paging through it does not parse it again.
+// It is keyed by the file and its size and mtime, so a changed file is parsed afresh.
+type readCache struct {
+	mu    sync.Mutex
+	path  string
+	size  int64
+	mtime time.Time
+	val   *parsed
+}
+
+func (c *readCache) get(path string, fi os.FileInfo) *parsed {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.val != nil && c.path == path && c.size == fi.Size() && c.mtime.Equal(fi.ModTime()) {
+		return c.val
+	}
+	return nil
+}
+
+func (c *readCache) put(path string, fi os.FileInfo, v *parsed) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.path, c.size, c.mtime, c.val = path, fi.Size(), fi.ModTime(), v
+}
+
+func headerBlock(raw []byte) string {
+	hdr := raw
+	if i := bytes.Index(hdr, []byte("\r\n\r\n")); i >= 0 {
+		hdr = hdr[:i]
+	} else if i := bytes.Index(hdr, []byte("\n\n")); i >= 0 {
+		hdr = hdr[:i]
+	}
+	return strings.ReplaceAll(string(hdr), "\r\n", "\n")
+}
+
+// readMessage returns the parsed message for read; nil when the body is not on disk.
+func (h *handlers) readMessage(ctx context.Context, id int64) (*loaded, *parsed, error) {
+	st, err := h.store.get()
+	if err != nil {
+		return nil, nil, err
+	}
+	sm, mb, err := st.Get(ctx, id)
+	if errors.Is(err, maildata.ErrNotFound) {
+		return nil, nil, fmt.Errorf("message %d not found", id)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	l := &loaded{sm: sm}
+	p, partial, ok := st.EmlxPath(id, mb)
+	if !ok {
+		return l, nil, nil
+	}
+	l.partial, l.emlx = partial, p
+	fi, statErr := os.Stat(p)
+	if statErr == nil {
+		if v := h.reads.get(p, fi); v != nil {
+			return l, v, nil
+		}
+	}
+	raw, err := message.ReadEmlx(p)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read message %d: %w", id, err)
+	}
+	m, err := message.Parse(raw)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse message %d: %w", id, err)
+	}
+	v := &parsed{m: m, ex: sync.OnceValue(func() message.Extracted { return message.Extract(m, m.HTML()) }), hdr: headerBlock(raw)}
+	if statErr == nil {
+		h.reads.put(p, fi, v)
+	}
+	return l, v, nil
+}
+
 func (h *handlers) addRead(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{Name: "read", Description: "Read one message: headers, codes, links, attachments, text.", Annotations: readOnly},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in readInput) (*mcp.CallToolResult, any, error) {
-			l, err := h.load(ctx, in.ID)
+			l, v, err := h.readMessage(ctx, in.ID)
 			if err != nil {
 				return errResult(err)
 			}
-			var m *message.Message
-			if l.raw != nil {
-				if m, err = message.Parse(l.raw); err != nil {
-					return errResult(fmt.Errorf("cannot parse message %d: %w", in.ID, err))
-				}
-			}
-			return textResult(renderMessage(l, m, in))
+			return textResult(renderMessage(l, v, in))
 		})
 }
 
-func renderMessage(l *loaded, m *message.Message, in readInput) string {
+func renderMessage(l *loaded, v *parsed, in readInput) string {
 	sm := l.sm
+	var m *message.Message
+	if v != nil {
+		m = v.m
+	}
 	var b strings.Builder
 	line := func(k, v string) {
 		if v = oneLine(v); v != "" {
@@ -110,21 +193,15 @@ func renderMessage(l *loaded, m *message.Message, in readInput) string {
 	if msgID != "" {
 		fmt.Fprintf(&b, "open: %s\n", messageLink(msgID))
 	}
-	if in.Headers && l.raw != nil {
-		hdr := l.raw
-		if i := bytes.Index(hdr, []byte("\r\n\r\n")); i >= 0 {
-			hdr = hdr[:i]
-		} else if i := bytes.Index(hdr, []byte("\n\n")); i >= 0 {
-			hdr = hdr[:i]
-		}
-		b.WriteString("headers:\n" + strings.ReplaceAll(string(hdr), "\r\n", "\n") + "\n")
+	if in.Headers && v != nil {
+		b.WriteString("headers:\n" + v.hdr + "\n")
 	}
 	if m == nil {
 		b.WriteString(notDownload)
 		return b.String()
 	}
 	if in.Offset <= 0 {
-		ex := message.Extract(m, m.HTML())
+		ex := v.ex()
 		if len(ex.Codes) > 0 {
 			b.WriteString("codes: " + strings.Join(ex.Codes, ", ") + "\n")
 		}
