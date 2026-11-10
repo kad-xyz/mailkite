@@ -139,8 +139,15 @@ func walk(e *message.Entity, idx *int, visit func(leaf) bool) bool {
 	return visit(l)
 }
 
-func readBody(e *message.Entity) []byte {
-	b, _ := io.ReadAll(e.Body)
+// readBody returns the decoded body; on a decode error it returns what was read so far
+// together with the error.
+func readBody(e *message.Entity) ([]byte, error) {
+	return io.ReadAll(e.Body)
+}
+
+// bodyOrPartial is the tolerant variant used for text: errors keep the partial data.
+func bodyOrPartial(e *message.Entity) []byte {
+	b, _ := readBody(e)
 	return b
 }
 
@@ -213,7 +220,7 @@ func Parse(raw []byte) (*Message, error) {
 	idx := 0
 	walk(e, &idx, func(l leaf) bool {
 		if l.isAttachment() {
-			size := int64(len(readBody(l.e)))
+			size, _ := io.Copy(io.Discard, l.e.Body)
 			name := l.name
 			if name == "" {
 				name = "part" + strconv.Itoa(l.index)
@@ -223,9 +230,9 @@ func Parse(raw []byte) (*Message, error) {
 		}
 		switch l.ct {
 		case "text/html":
-			b.html = joinText(b.html, utf8Text(readBody(l.e)))
+			b.html = joinText(b.html, utf8Text(bodyOrPartial(l.e)))
 		case "text/plain", "":
-			b.plain = joinText(b.plain, utf8Text(readBody(l.e)))
+			b.plain = joinText(b.plain, utf8Text(bodyOrPartial(l.e)))
 		}
 		return true
 	})
@@ -269,13 +276,15 @@ func PartData(raw []byte, index int) (string, []byte, error) {
 	var name string
 	var data []byte
 	found := false
+	var readErr error
 	idx := 0
 	walk(e, &idx, func(l leaf) bool {
 		if l.index != index {
 			return true
 		}
 		found = true
-		name, data = l.name, readBody(l.e)
+		name = l.name
+		data, readErr = readBody(l.e)
 		if name == "" {
 			name = "part" + strconv.Itoa(l.index)
 		}
@@ -283,6 +292,9 @@ func PartData(raw []byte, index int) (string, []byte, error) {
 	})
 	if !found {
 		return "", nil, fmt.Errorf("part %d not found", index)
+	}
+	if readErr != nil {
+		return "", nil, fmt.Errorf("part %d is corrupt: %w", index, readErr)
 	}
 	return name, data, nil
 }

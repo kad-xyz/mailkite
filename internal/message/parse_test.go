@@ -183,3 +183,13 @@ func TestHTMLToTextLayoutTricks(t *testing.T) {
 		t.Fatalf("%q", got)
 	}
 }
+
+func TestPartDataReportsCorruptBody(t *testing.T) {
+	raw := "From: a@x.com\r\nSubject: s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nQUJD!!!!REVG\r\n--B--\r\n"
+	if _, err := Parse([]byte(raw)); err != nil {
+		t.Fatalf("Parse must stay tolerant: %v", err)
+	}
+	if _, data, err := PartData([]byte(raw), 0); err == nil {
+		t.Errorf("corrupt part returned without error: %q", data)
+	}
+}
