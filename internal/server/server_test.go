@@ -314,12 +314,19 @@ func TestNoAccessIsToolError(t *testing.T) {
 func TestSaveAttachmentDirRestricted(t *testing.T) {
 	e := setup(t)
 	home := os.Getenv("HOME")
-	os.MkdirAll(filepath.Join(home, "Library"), 0o755)
-	os.Symlink(filepath.Join(home, "Library"), filepath.Join(home, "link"))
+	if err := os.MkdirAll(filepath.Join(home, "Library"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "Library"), filepath.Join(home, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "Library"), filepath.Join(home, "lib2")); err != nil {
+		t.Fatal(err)
+	}
 	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
 		base64.StdEncoding.EncodeToString([]byte("X")) + "\r\n--B--\r\n"
 	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
-	for _, d := range []string{"rel/dir", "~", "~/Library/LaunchAgents", "~/.ssh", "/tmp/x", "~/link/x", "~/Downloads/.hid", "~/../other"} {
+	for _, d := range []string{"rel/dir", "~", "~/Library/LaunchAgents", "~/library/LaunchAgents", "~/LIBRARY/x", "~/.ssh", "/tmp/x", "~/link/x", "~/Downloads/.hid", "~/../other"} {
 		out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": d})
 		if d == "~" {
 			// the home directory itself is inside $HOME and allowed

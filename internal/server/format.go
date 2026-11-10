@@ -189,10 +189,24 @@ func resolveDir(dir string) (string, error) {
 			if strings.HasPrefix(seg, ".") {
 				return "", errors.New("dir must not be a hidden folder")
 			}
-			if i == 0 && seg == "Library" {
+			if i == 0 && isLibrary(rhome, seg) {
 				return "", errors.New("dir must not be inside ~/Library")
 			}
 		}
 	}
 	return full, nil
+}
+
+// isLibrary reports whether the first component under home is ~/Library, also on
+// case-insensitive volumes where "library" or "LIBRARY" is the same folder.
+func isLibrary(home, seg string) bool {
+	if strings.EqualFold(seg, "Library") {
+		return true
+	}
+	lib, err := os.Stat(filepath.Join(home, "Library"))
+	if err != nil {
+		return false
+	}
+	cur, err := os.Stat(filepath.Join(home, seg))
+	return err == nil && os.SameFile(lib, cur)
 }
