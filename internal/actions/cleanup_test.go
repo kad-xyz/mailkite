@@ -811,6 +811,9 @@ func TestMarkLargeNeedsPlan(t *testing.T) {
 	}
 	// Any move, even of one message and to any mailbox, goes through the dialog.
 	for _, to := range []string{"Trash", "Junk", "[Gmail]/Spam", "Deleted Items", "Archive"} {
+		v.f.AddMailbox("imap://" + uuidA + "/" + strings.ReplaceAll(to, " ", "%20"))
+	}
+	for _, to := range []string{"Trash", "Junk", "[Gmail]/Spam", "Deleted Items", "Archive"} {
 		p, now, err = v.e.BuildMark(ctxT(t), MarkRequest{IDs: ids[:1], Action: "move", MoveTo: to})
 		if err != nil || now || p.PlanID == "" {
 			t.Fatalf("%s: p %+v now %v err %v", to, p, now, err)
@@ -878,6 +881,7 @@ func TestAllowProtected(t *testing.T) {
 	news, _ := v.add(uuidA, "Shop <news@shop.example>", "Скидки", "Распродажа", msgOpt{})
 	code, _ := v.add(uuidA, "Shop <news@shop.example>", "Ваш код подтверждения", "Никому", msgOpt{})
 	other, _ := v.add(uuidA, "Bank <news@bank.example>", "Ваш код входа", "Никому", msgOpt{})
+	v.f.AddMailbox("imap://" + uuidA + "/Archive")
 	// Default: protected excluded from cleanup and from a mark move.
 	p := eraseShop(v)
 	if p.Count != 1 || len(p.Protected) != 1 || p.Protected[0].ID != code {
@@ -897,14 +901,14 @@ func TestAllowProtected(t *testing.T) {
 	if _, err := v.e.Execute(ctxT(t), p.PlanID); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(v.confirm.body, "including 1 protected messages") || v.confirm.button != "Стереть 2" {
+	if !strings.Contains(v.confirm.body, "в том числе защищённых: 1") || v.confirm.button != "Стереть 2" {
 		t.Fatalf("dialog %q %q", v.confirm.body, v.confirm.button)
 	}
 	p, _, err = v.e.BuildMark(ctxT(t), MarkRequest{IDs: []int64{news, code}, Action: "move", MoveTo: "Archive", AllowProtected: []int64{code, other}})
 	if err != nil || p.Count != 2 || p.PlanID == "" {
 		t.Fatalf("mark allowed %+v %v", p, err)
 	}
-	if _, err := v.e.Execute(ctxT(t), p.PlanID); err != nil || !strings.Contains(v.confirm.body, "including 1 protected messages") {
+	if _, err := v.e.Execute(ctxT(t), p.PlanID); err != nil || !strings.Contains(v.confirm.body, "в том числе защищённых: 1") {
 		t.Fatalf("mark dialog %q %v", v.confirm.body, err)
 	}
 }

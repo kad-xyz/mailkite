@@ -332,3 +332,17 @@ func (f *Fixture) RemoveMessage(rowid int64) {
 		os.Remove(f.emlxPath(u, rowid, partial))
 	}
 }
+
+// AddMailbox registers an (empty) mailbox URL, e.g. "imap://<uuid>/Archive".
+func (f *Fixture) AddMailbox(mailboxURL string) {
+	f.t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var id int64
+	if err := f.idx.QueryRow("SELECT ROWID FROM mailboxes WHERE url=?", mailboxURL).Scan(&id); err == nil {
+		return
+	}
+	if _, err := f.idx.Exec("INSERT INTO mailboxes(url,total_count,unread_count) VALUES(?,0,0)", mailboxURL); err != nil {
+		f.t.Fatal(err)
+	}
+}

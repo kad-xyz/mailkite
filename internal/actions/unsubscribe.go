@@ -444,7 +444,7 @@ func (e *Engine) BuildUnsubscribe(ctx context.Context, senders []string, alsoCle
 			p.Button += fmt.Sprintf(" и в корзину %d", p.Count)
 		}
 	}
-	plan, err := safety.NewPlanFor(action, mergeTargets(x.Sources, x.Cleanup), e.unsubSummary(x, cleanupSummary), p.Button, x, e.now())
+	plan, err := safety.NewPlanFor(action, mergeTargets(x.Sources, x.Cleanup), e.unsubSummary(x, p.Count, cleanupSummary), p.Button, x, e.now())
 	if err != nil {
 		return Preview{}, err
 	}
@@ -459,8 +459,11 @@ func hostOf(raw string) string {
 	return ""
 }
 
-// unsubSummary is the dialog body: who is unsubscribed how, then the cleanup.
-func (e *Engine) unsubSummary(x unsubExtra, cleanup string) string {
+// unsubSummary is the dialog body: the first sentence (who and, with a cleanup,
+// how many messages), the protected warning, then who is unsubscribed how and the
+// cleanup's own summary. Every address, host and subject is one line of at most
+// fragRunes runes.
+func (e *Engine) unsubSummary(x unsubExtra, count int, cleanup string) string {
 	var b strings.Builder
 	var auto, manual []unsubItem
 	for _, it := range x.Items {
@@ -471,21 +474,33 @@ func (e *Engine) unsubSummary(x unsubExtra, cleanup string) string {
 			manual = append(manual, it)
 		}
 	}
-	fmt.Fprintf(&b, "Отписаться от %d %s:", len(auto), plural(len(auto), "отправителя", "отправителей", "отправителей"))
+	fmt.Fprintf(&b, "Отписаться от %d %s", len(auto), plural(len(auto), "отправителя", "отправителей", "отправителей"))
+	if cleanup != "" {
+		switch x.CleanupX.Op {
+		case "erase":
+			fmt.Fprintf(&b, " и стереть насовсем %s", letters(count))
+		case "trash":
+			fmt.Fprintf(&b, " и переместить в Корзину %s", letters(count))
+		}
+	}
+	b.WriteString(".")
+	if cleanup != "" && x.CleanupX.Included > 0 {
+		fmt.Fprintf(&b, "\nВнимание: в том числе защищённых: %d.", x.CleanupX.Included)
+	}
 	for i, it := range auto {
 		if i == dialogSenders {
 			fmt.Fprintf(&b, "\n…и ещё %d", len(auto)-i)
 			break
 		}
 		if it.Method == MethodOneClick {
-			fmt.Fprintf(&b, "\n%s — запрос на %s", it.Sender, hostOf(it.URL))
+			fmt.Fprintf(&b, "\n%s — запрос на %s", frag(it.Sender), frag(hostOf(it.URL)))
 		} else {
 			to, _, _, _ := parseMailto(it.URL)
 			from := ""
 			if acc, ok := e.Cfg.ByMailUUID(it.Account); ok {
 				from = acc.Email
 			}
-			fmt.Fprintf(&b, "\n%s — письмо на %s с адреса %s", it.Sender, to, from)
+			fmt.Fprintf(&b, "\n%s — письмо на %s с адреса %s", frag(it.Sender), frag(to), frag(from))
 		}
 	}
 	if len(manual) > 0 {

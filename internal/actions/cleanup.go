@@ -390,8 +390,8 @@ func validOp(op, moveTo string, ops ...string) error {
 	if !found {
 		return fmt.Errorf("unknown action %q (want %s)", op, strings.Join(ops, "|"))
 	}
-	if op == "move" && strings.TrimSpace(moveTo) == "" {
-		return errors.New("action move needs a target mailbox (move_to)")
+	if op == "move" {
+		return checkMoveToText(moveTo)
 	}
 	return nil
 }
@@ -428,6 +428,11 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 	b.preview(&p)
 	if b.count == 0 {
 		return p, nil
+	}
+	if r.Action == "move" {
+		if err := e.checkMoveTarget(ctx, r.MoveTo, b.names); err != nil {
+			return Preview{}, err
+		}
 	}
 	x := planExtra{Op: r.Action, MoveTo: r.MoveTo, Unsubscribe: r.Unsubscribe, Names: b.names,
 		Protected: len(p.Protected), Included: b.included}
@@ -541,6 +546,11 @@ func (e *Engine) BuildMark(ctx context.Context, r MarkRequest) (Preview, bool, e
 	p.Skipped = append(extra, p.Skipped...)
 	if b.count == 0 {
 		return p, false, nil
+	}
+	if action == "move" {
+		if err := e.checkMoveTarget(ctx, moveTo, b.names); err != nil {
+			return Preview{}, false, err
+		}
 	}
 	x := planExtra{Op: action, MoveTo: moveTo, Names: b.names, Protected: len(p.Protected), Included: b.included}
 	if b.count <= e.markLimit() && action != "move" {
@@ -998,13 +1008,15 @@ func button(op string, n int) string {
 	return fmt.Sprintf("Переместить %d", n)
 }
 
-// summary is the dialog body: what happens, to how many messages, from whom.
+// summary is the dialog body: what happens, to how many messages, from whom. The
+// first sentence and the protected warning come first; every name and address is
+// one line of at most fragRunes runes, so nothing can push them out of the body.
 func summary(x planExtra, p *Preview, byAcc map[string]int) string {
 	var b strings.Builder
 	n := p.Count
 	switch x.Op {
 	case "erase":
-		fmt.Fprintf(&b, "Стереть насовсем %s. Копии .eml останутся в архиве mailkite на 30 дней.", letters(n))
+		fmt.Fprintf(&b, "Стереть насовсем %s.", letters(n))
 	case "trash":
 		fmt.Fprintf(&b, "Переместить в Корзину %s.", letters(n))
 	case "read":
@@ -1016,7 +1028,13 @@ func summary(x planExtra, p *Preview, byAcc map[string]int) string {
 	case "unflag":
 		fmt.Fprintf(&b, "Снять флаг: %s.", letters(n))
 	case "move":
-		fmt.Fprintf(&b, "Переместить %s в «%s».", letters(n), x.MoveTo)
+		fmt.Fprintf(&b, "Переместить %s в «%s».", letters(n), frag(x.MoveTo))
+	}
+	if x.Included > 0 {
+		fmt.Fprintf(&b, "\nВнимание: в том числе защищённых: %d.", x.Included)
+	}
+	if x.Op == "erase" {
+		b.WriteString("\nКопии .eml останутся в архиве mailkite на 30 дней.")
 	}
 	b.WriteString("\n\nОтправители:")
 	for i, s := range p.BySender {
@@ -1028,16 +1046,13 @@ func summary(x planExtra, p *Preview, byAcc map[string]int) string {
 			fmt.Fprintf(&b, "\n…и ещё %d (%s)", rest, letters(restN))
 			break
 		}
-		fmt.Fprintf(&b, "\n%d — %s", s.Count, s.Sender)
+		fmt.Fprintf(&b, "\n%d — %s", s.Count, frag(s.Sender))
 	}
 	var accs []string
 	for _, name := range sortedKeys(byAcc) {
-		accs = append(accs, fmt.Sprintf("%s — %d", name, byAcc[name]))
+		accs = append(accs, fmt.Sprintf("%s — %d", frag(name), byAcc[name]))
 	}
 	b.WriteString("\n\nАккаунты: " + strings.Join(accs, ", "))
-	if x.Included > 0 {
-		fmt.Fprintf(&b, "\nincluding %d protected messages", x.Included)
-	}
 	if x.Protected > 0 {
 		fmt.Fprintf(&b, "\nЗащищённые письма не тронуты: %d", x.Protected)
 	}
