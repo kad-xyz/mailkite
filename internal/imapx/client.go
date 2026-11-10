@@ -42,6 +42,7 @@ type Conn struct {
 	nc       net.Conn
 	c        *imapclient.Client
 	selected string
+	validity map[string]uint32 // UIDVALIDITY seen per mailbox on this Conn
 
 	noCopyUID bool // tests: behave as if the server sent no COPYUID
 }
@@ -144,11 +145,26 @@ func (c *Conn) sel(mailbox string) error {
 	if c.selected == mailbox {
 		return nil
 	}
-	if _, err := c.c.Select(mailbox, nil).Wait(); err != nil {
+	return c.selFresh(mailbox)
+}
+
+// selFresh always issues SELECT and refuses when the mailbox's UIDVALIDITY differs
+// from the one seen earlier on this Conn (UIDs would point at other messages).
+func (c *Conn) selFresh(mailbox string) error {
+	d, err := c.c.Select(mailbox, nil).Wait()
+	if err != nil {
 		c.selected = ""
 		return fmt.Errorf("imap: select %q: %w", mailbox, err)
 	}
 	c.selected = mailbox
+	if c.validity == nil {
+		c.validity = map[string]uint32{}
+	}
+	if prev, ok := c.validity[mailbox]; ok && prev != d.UIDValidity {
+		c.selected = ""
+		return fmt.Errorf("imap: UIDVALIDITY of %q changed (%d -> %d); refusing to act on old UIDs", mailbox, prev, d.UIDValidity)
+	}
+	c.validity[mailbox] = d.UIDValidity
 	return nil
 }
 
@@ -231,7 +247,8 @@ func (c *Conn) searchID(id string) ([]uint32, error) {
 	return nil, nil
 }
 
-// existing returns which of uids still exist in the selected mailbox.
+// existing returns which of uids still exist in the selected mailbox, with one
+// UID SEARCH over the whole set.
 func (c *Conn) existing(uids []uint32) ([]uint32, error) {
 	if len(uids) == 0 {
 		return nil, nil
@@ -240,53 +257,28 @@ func (c *Conn) existing(uids []uint32) ([]uint32, error) {
 	if err != nil {
 		return nil, fmt.Errorf("imap: search uid: %w", err)
 	}
-	got := fromUIDs(d.AllUIDs())
+	got := map[uint32]bool{}
+	for _, u := range d.AllUIDs() {
+		got[uint32(u)] = true
+	}
 	var out []uint32
 	for _, u := range uids {
-		if slices.Contains(got, u) {
+		if got[u] {
 			out = append(out, u)
 		}
 	}
 	return out, nil
 }
 
-// leftovers returns which of pending are still in the selected mailbox: by UID,
-// and by a Message-ID search limited to pending UIDs (a duplicate with the same
-// Message-ID that was not asked for is never counted, so never touched).
-func (c *Conn) leftovers(pending []uint32, ids map[uint32]string) ([]uint32, error) {
-	left, err := c.existing(pending)
-	if err != nil {
-		return nil, err
-	}
-	seen := map[string]bool{}
-	for _, u := range pending {
-		id := ids[u]
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		hits, err := c.searchID(id)
-		if err != nil {
-			return nil, err
-		}
-		for _, h := range hits {
-			if slices.Contains(pending, h) && !slices.Contains(left, h) {
-				left = append(left, h)
-			}
-		}
-	}
-	slices.Sort(left)
-	return left, nil
-}
-
 // Locate finds a message by Message-ID: first checks uidHint's envelope, then searches.
+// It records the mailbox's UIDVALIDITY; a later Erase on this Conn refuses if it changed.
 func (c *Conn) Locate(ctx context.Context, mailbox, messageID string, uidHint uint32) (uint32, bool, error) {
 	id := normID(messageID)
 	if id == "" {
 		return 0, false, errors.New("imap: empty Message-ID")
 	}
 	defer c.begin(ctx)()
-	if err := c.sel(mailbox); err != nil {
+	if err := c.selFresh(mailbox); err != nil {
 		return 0, false, err
 	}
 	if uidHint != 0 {
@@ -342,18 +334,34 @@ func (c *Conn) deleteAndExpunge(uids []uint32) error {
 	return nil
 }
 
-// expungeVerified erases uids from the selected mailbox, retrying leftovers,
-// and returns the UIDs that are confirmed gone and those that remain.
-func (c *Conn) expungeVerified(uids []uint32, ids map[uint32]string) (gone, left []uint32, err error) {
+// clearDeleted removes \Deleted from uids (best effort; missing UIDs are ignored by
+// the server), so messages that were not erased are not left marked for a later EXPUNGE.
+func (c *Conn) clearDeleted(uids []uint32) {
+	if len(uids) == 0 {
+		return
+	}
+	_ = c.c.Store(uidSet(uids), &imap.StoreFlags{
+		Op: imap.StoreFlagsDel, Silent: true, Flags: []imap.Flag{imap.FlagDeleted},
+	}, nil).Close()
+}
+
+// expungeVerified erases uids from the selected mailbox and checks by UID that they
+// are gone, retrying leftovers. gone holds only UIDs confirmed absent by a successful
+// check; on an error the unconfirmed ones stay in left.
+func (c *Conn) expungeVerified(uids []uint32) (gone, left []uint32, err error) {
 	pending := slices.Clone(uids)
 	for i := 0; i < eraseAttempts && len(pending) > 0; i++ {
-		if err := c.deleteAndExpunge(pending); err != nil {
-			return without(uids, pending), pending, err
+		if err = c.deleteAndExpunge(pending); err == nil {
+			var still []uint32
+			if still, err = c.existing(pending); err == nil {
+				pending = still
+				continue
+			}
 		}
-		if pending, err = c.leftovers(pending, ids); err != nil {
-			return without(uids, pending), pending, err
-		}
+		c.clearDeleted(pending)
+		return without(uids, pending), pending, err
 	}
+	c.clearDeleted(pending)
 	return without(uids, pending), pending, nil
 }
 
@@ -367,37 +375,42 @@ func without(all, drop []uint32) []uint32 {
 	return out
 }
 
-func present(uids []uint32, ids map[uint32]string) []uint32 {
-	var out []uint32
-	for _, u := range uids {
-		if _, ok := ids[u]; ok && !slices.Contains(out, u) {
-			out = append(out, u)
-		}
-	}
-	slices.Sort(out)
-	return out
+// Target is a message to erase: its UID and the Message-ID it must still carry.
+type Target struct {
+	UID       uint32
+	MessageID string
 }
 
-// Erase permanently removes exactly uids from mailbox and verifies they are gone.
-// UIDs that do not exist are skipped. It returns the UIDs actually erased; an error
-// means some messages could not be erased (they are not in the result).
+// EraseResult says what Erase did with each target UID.
+// Erased: confirmed gone. Missing: no such UID. Mismatched: the UID holds a message
+// with another (or no) Message-ID, so it was not touched. Targets in none of these
+// lists were attempted but not confirmed erased; the error then says why.
+type EraseResult struct {
+	Erased, Missing, Mismatched []uint32
+}
+
+// Erase permanently removes exactly the target messages from mailbox and checks
+// by UID that they are gone. Before any change it fetches all target envelopes in
+// one command and acts only on UIDs whose Message-ID matches. On an error the result
+// still lists what was confirmed erased.
 //
 // Non-Gmail: \Deleted + UID EXPUNGE (UIDPLUS is required: a plain EXPUNGE could
 // remove other \Deleted messages). Gmail: UID MOVE to Trash, then \Deleted +
 // UID EXPUNGE of the moved copies there.
-func (c *Conn) Erase(ctx context.Context, mailbox string, uids []uint32, gmail bool) ([]uint32, error) {
-	if len(uids) == 0 {
-		return nil, nil
+func (c *Conn) Erase(ctx context.Context, mailbox string, targets []Target, gmail bool) (EraseResult, error) {
+	var res EraseResult
+	if len(targets) == 0 {
+		return res, nil
 	}
 	defer c.begin(ctx)()
 	if !c.c.Caps().Has(imap.CapUIDPlus) {
-		return nil, errors.New("imap: server lacks UIDPLUS (UID EXPUNGE); refusing to erase")
+		return res, errors.New("imap: server lacks UIDPLUS (UID EXPUNGE); refusing to erase")
 	}
 	trash := ""
 	if gmail {
 		t, err := c.specialUse(imap.MailboxAttrTrash)
 		if err != nil {
-			return nil, err
+			return res, err
 		}
 		if t == "" {
 			t = gmailTrash
@@ -406,25 +419,47 @@ func (c *Conn) Erase(ctx context.Context, mailbox string, uids []uint32, gmail b
 			trash = t
 		}
 	}
-	if err := c.sel(mailbox); err != nil {
-		return nil, err
+	if err := c.selFresh(mailbox); err != nil {
+		return res, err
 	}
+	var uids []uint32
+	want := map[uint32]string{}
+	for _, t := range targets {
+		if _, dup := want[t.UID]; !dup {
+			uids = append(uids, t.UID)
+		}
+		want[t.UID] = normID(t.MessageID)
+	}
+	slices.Sort(uids)
 	ids, err := c.envelopeIDs(uids)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
-	targets := present(uids, ids)
-	if len(targets) == 0 {
-		return nil, nil
+	var ok []uint32
+	for _, u := range uids {
+		got, exists := ids[u]
+		switch {
+		case !exists:
+			res.Missing = append(res.Missing, u)
+		case got == "" || got != want[u]:
+			res.Mismatched = append(res.Mismatched, u)
+		default:
+			ok = append(ok, u)
+		}
+	}
+	if len(ok) == 0 {
+		return res, nil
 	}
 	if trash == "" {
-		gone, left, err := c.expungeVerified(targets, ids)
+		gone, left, err := c.expungeVerified(ok)
+		res.Erased = gone
 		if err == nil && len(left) > 0 {
 			err = fmt.Errorf("imap: %d message(s) still in %q after %d attempts: %v", len(left), mailbox, eraseAttempts, left)
 		}
-		return gone, err
+		return res, err
 	}
-	return c.eraseViaTrash(mailbox, trash, targets, ids)
+	res.Erased, err = c.eraseViaTrash(mailbox, trash, ok, ids)
+	return res, err
 }
 
 func (c *Conn) eraseViaTrash(mailbox, trash string, targets []uint32, ids map[uint32]string) ([]uint32, error) {
@@ -436,24 +471,36 @@ func (c *Conn) eraseViaTrash(mailbox, trash string, targets []uint32, ids map[ui
 
 	dest := map[uint32]uint32{} // source UID -> UID in Trash
 	pending := slices.Clone(targets)
+	var moveErr error
 	for i := 0; i < eraseAttempts && len(pending) > 0; i++ {
 		md, err := c.c.Move(uidSet(pending), trash).Wait()
 		if err != nil {
-			return nil, fmt.Errorf("imap: move to %q: %w", trash, err)
+			moveErr = fmt.Errorf("imap: move to %q: %w", trash, err)
+		} else {
+			if !c.noCopyUID {
+				mapCopyUID(md, dest)
+			}
+			var still []uint32
+			if still, err = c.existing(pending); err == nil {
+				pending = still
+				continue
+			}
+			moveErr = fmt.Errorf("imap: checking %q after move to %q (some messages may already be in %s, not erased): %w", mailbox, trash, trash, err)
 		}
-		if !c.noCopyUID {
-			mapCopyUID(md, dest)
-		}
-		if pending, err = c.leftovers(pending, ids); err != nil {
-			return nil, err
-		}
+		break
 	}
 	moved := without(targets, pending)
+	if moveErr == nil && len(pending) > 0 {
+		moveErr = fmt.Errorf("imap: %d message(s) could not be moved out of %q: %v", len(pending), mailbox, pending)
+	}
+	if moveErr != nil && len(pending) == len(targets) {
+		return nil, moveErr
+	}
 
 	// Trash UIDs to erase, each tied to its source UID.
 	trashOf := map[uint32][]uint32{}
 	if err := c.sel(trash); err != nil {
-		return nil, err
+		return nil, joinErr(moveErr, fmt.Errorf("%w (%d message(s) moved to %s but not erased: %v)", err, len(moved), trash, moved))
 	}
 	for _, src := range moved {
 		if d, ok := dest[src]; ok {
@@ -463,7 +510,7 @@ func (c *Conn) eraseViaTrash(mailbox, trash string, targets []uint32, ids map[ui
 		// No COPYUID: find the moved copy by Message-ID among UIDs created by this move.
 		hits, err := c.searchID(ids[src])
 		if err != nil {
-			return nil, err
+			return nil, joinErr(moveErr, fmt.Errorf("imap: locating moved copies in %s (%d message(s) moved there but not erased: %v): %w", trash, len(moved), moved, err))
 		}
 		for _, h := range hits {
 			if h >= trashFloor {
@@ -472,23 +519,16 @@ func (c *Conn) eraseViaTrash(mailbox, trash string, targets []uint32, ids map[ui
 		}
 	}
 	var trashUIDs []uint32
-	trashIDs := map[uint32]string{}
-	for src, l := range trashOf {
-		for _, u := range l {
-			trashUIDs = append(trashUIDs, u)
-			trashIDs[u] = ids[src]
-		}
+	for _, l := range trashOf {
+		trashUIDs = append(trashUIDs, l...)
 	}
 	slices.Sort(trashUIDs)
-	var left []uint32
+	left, expErr := []uint32(nil), error(nil)
 	if len(trashUIDs) > 0 {
-		if _, left, err = c.expungeVerified(trashUIDs, trashIDs); err != nil {
-			return nil, err
-		}
+		_, left, expErr = c.expungeVerified(trashUIDs)
 	}
 
-	var erased []uint32
-	var stuck []uint32
+	var erased, stuck []uint32
 	for _, src := range moved {
 		tl, ok := trashOf[src]
 		if !ok || slices.ContainsFunc(tl, func(u uint32) bool { return slices.Contains(left, u) }) {
@@ -497,13 +537,26 @@ func (c *Conn) eraseViaTrash(mailbox, trash string, targets []uint32, ids map[ui
 		}
 		erased = append(erased, src)
 	}
-	switch {
-	case len(pending) > 0:
-		return erased, fmt.Errorf("imap: %d message(s) could not be moved out of %q: %v", len(pending), mailbox, pending)
-	case len(stuck) > 0:
-		return erased, fmt.Errorf("imap: %d message(s) moved to %q but not erased there: %v", len(stuck), trash, stuck)
+	var trashErr error
+	if len(stuck) > 0 {
+		trashErr = fmt.Errorf("imap: %d message(s) moved to %s but not erased there (source UIDs %v)", len(stuck), trash, stuck)
+		if expErr != nil {
+			trashErr = fmt.Errorf("%w: %w", trashErr, expErr)
+		}
+	} else if expErr != nil {
+		trashErr = expErr
 	}
-	return erased, nil
+	return erased, joinErr(moveErr, trashErr)
+}
+
+func joinErr(a, b error) error {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	}
+	return fmt.Errorf("%w; %w", a, b)
 }
 
 // mapCopyUID records source->destination UIDs from a COPYUID response.

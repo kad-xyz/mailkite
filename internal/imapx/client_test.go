@@ -3,9 +3,11 @@ package imapx
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +39,10 @@ type testServer struct {
 	searches    int
 	expunges    int
 	dropExpunge int
+	fetches     int
+	failSearch  int    // the N-th SEARCH (counted since resetCounts) fails; 0 = never
+	keepOnce    uint32 // the first UID EXPUNGE that includes this UID leaves it in place
+	failExpunge bool   // every UID EXPUNGE fails
 }
 
 type testOptions struct {
@@ -121,8 +127,19 @@ func (s *testSession) List(w *imapserver.ListWriter, ref string, patterns []stri
 func (s *testSession) Search(kind imapserver.NumKind, c *imap.SearchCriteria, o *imap.SearchOptions) (*imap.SearchData, error) {
 	s.ts.mu.Lock()
 	s.ts.searches++
+	fail := s.ts.failSearch != 0 && s.ts.searches == s.ts.failSearch
 	s.ts.mu.Unlock()
+	if fail {
+		return nil, &imap.Error{Type: imap.StatusResponseTypeNo, Text: "injected search failure"}
+	}
 	return s.UserSession.Search(kind, c, o)
+}
+
+func (s *testSession) Fetch(w *imapserver.FetchWriter, numSet imap.NumSet, o *imap.FetchOptions) error {
+	s.ts.mu.Lock()
+	s.ts.fetches++
+	s.ts.mu.Unlock()
+	return s.UserSession.Fetch(w, numSet, o)
 }
 
 func (s *testSession) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) error {
@@ -132,9 +149,32 @@ func (s *testSession) Expunge(w *imapserver.ExpungeWriter, uids *imap.UIDSet) er
 	if drop {
 		s.ts.dropExpunge--
 	}
+	fail := s.ts.failExpunge
+	keep := s.ts.keepOnce
+	if keep != 0 && uids != nil && uids.Contains(imap.UID(keep)) {
+		s.ts.keepOnce = 0
+	} else {
+		keep = 0
+	}
 	s.ts.mu.Unlock()
+	if fail {
+		return &imap.Error{Type: imap.StatusResponseTypeNo, Text: "injected expunge failure"}
+	}
 	if drop {
 		return nil
+	}
+	if keep != 0 {
+		nums, _ := uids.Nums()
+		var rest imap.UIDSet
+		for _, u := range nums {
+			if uint32(u) != keep {
+				rest.AddNum(u)
+			}
+		}
+		if len(rest) == 0 {
+			return nil
+		}
+		uids = &rest
 	}
 	return s.UserSession.Expunge(w, uids)
 }
@@ -147,8 +187,47 @@ func (ts *testServer) counts() (searches, expunges int) {
 
 func (ts *testServer) resetCounts() {
 	ts.mu.Lock()
-	ts.searches, ts.expunges = 0, 0
+	ts.searches, ts.expunges, ts.fetches = 0, 0, 0
 	ts.mu.Unlock()
+}
+
+func (ts *testServer) set(f func(ts *testServer)) {
+	ts.mu.Lock()
+	f(ts)
+	ts.mu.Unlock()
+}
+
+// targets builds erase targets for uids with their real Message-IDs.
+func (ts *testServer) targets(t *testing.T, box string, uids []uint32) []Target {
+	t.Helper()
+	c, err := imapclient.DialInsecure(ts.addr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.Login(testUser, testPass).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Select(box, &imap.SelectOptions{ReadOnly: true}).Wait(); err != nil {
+		t.Fatal(err)
+	}
+	var set imap.UIDSet
+	for _, u := range uids {
+		set.AddNum(imap.UID(u))
+	}
+	msgs, err := c.Fetch(set, &imap.FetchOptions{UID: true, Envelope: true}).Collect()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[uint32]string{}
+	for _, m := range msgs {
+		ids[uint32(m.UID)] = m.Envelope.MessageID
+	}
+	var out []Target
+	for _, u := range uids {
+		out = append(out, Target{UID: u, MessageID: ids[u]})
+	}
+	return out
 }
 
 func msg(id, subject string) []byte {
@@ -260,7 +339,8 @@ func TestEraseNonGmail(t *testing.T) {
 	uids := ts.seed(t, "INBOX", msg("a@x", "A"), msg("b@x", "B"), msg("keep@x", "K"))
 	c := ts.dial(t)
 
-	erased, err := c.Erase(ctx(t), "INBOX", uids[:2], false)
+	res, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids[:2]), false)
+	erased := res.Erased
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +370,7 @@ func TestEraseLeavesOtherDeletedMessages(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := ts.dial(t)
-	if _, err := c.Erase(ctx(t), "INBOX", uids, false); err != nil {
+	if _, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids), false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := ts.peek(t, "INBOX")[uint32(other.UID)]; !ok {
@@ -302,7 +382,7 @@ func TestEraseRefusesWithoutUIDPlus(t *testing.T) {
 	ts := startServer(t, testOptions{caps: imap.CapSet{imap.CapIMAP4rev1: {}}})
 	uids := ts.seed(t, "INBOX", msg("a@x", "A"))
 	c := ts.dial(t)
-	if _, err := c.Erase(ctx(t), "INBOX", uids, false); err == nil {
+	if _, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids), false); err == nil {
 		t.Fatal("expected refusal without UIDPLUS")
 	}
 	if len(ts.peek(t, "INBOX")) != 1 {
@@ -322,7 +402,8 @@ func TestEraseGmailMovesToTrashThenExpunges(t *testing.T) {
 	uids := ts.seed(t, "INBOX", msg("g1@x", "G1"), msg("g2@x", "G2"), msg("keep@x", "K"))
 	c := ts.dial(t)
 
-	erased, err := c.Erase(ctx(t), "INBOX", uids[:2], true)
+	res, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids[:2]), true)
+	erased := res.Erased
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +427,8 @@ func TestEraseGmailFallbackTrashName(t *testing.T) {
 	ts := startServer(t, testOptions{boxes: []string{"INBOX", gmTrash}})
 	uids := ts.seed(t, "INBOX", msg("g1@x", "G1"))
 	c := ts.dial(t)
-	erased, err := c.Erase(ctx(t), "INBOX", uids, true)
+	res, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids), true)
+	erased := res.Erased
 	if err != nil || len(erased) != 1 {
 		t.Fatalf("erased=%v err=%v", erased, err)
 	}
@@ -361,7 +443,8 @@ func TestEraseVerifiesAndRetries(t *testing.T) {
 	c := ts.dial(t)
 	ts.resetCounts()
 
-	erased, err := c.Erase(ctx(t), "INBOX", uids, false)
+	res, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids), false)
+	erased := res.Erased
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +464,8 @@ func TestEraseGivesUpAfterRetries(t *testing.T) {
 	uids := ts.seed(t, "INBOX", msg("a@x", "A"))
 	c := ts.dial(t)
 	ts.resetCounts()
-	erased, err := c.Erase(ctx(t), "INBOX", uids, false)
+	res, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids), false)
+	erased := res.Erased
 	if err == nil {
 		t.Fatal("expected error when messages remain")
 	}
@@ -508,7 +592,8 @@ func TestEraseGmailWithoutCopyUIDSparesOlderTrash(t *testing.T) {
 	uids := ts.seed(t, "INBOX", msg("dup@x", "D"))
 	c := ts.dial(t)
 	c.noCopyUID = true
-	erased, err := c.Erase(ctx(t), "INBOX", uids, true)
+	res, err := c.Erase(ctx(t), "INBOX", ts.targets(t, "INBOX", uids), true)
+	erased := res.Erased
 	if err != nil || !slices.Equal(erased, uids) {
 		t.Fatalf("erased=%v err=%v", erased, err)
 	}
@@ -518,5 +603,140 @@ func TestEraseGmailWithoutCopyUIDSparesOlderTrash(t *testing.T) {
 	}
 	if len(ts.peek(t, "INBOX")) != 0 {
 		t.Fatal("inbox not empty")
+	}
+}
+
+func TestEraseChecksTargets(t *testing.T) {
+	ts := startServer(t, testOptions{})
+	uids := ts.seed(t, "INBOX", msg("a@x", "A"), msg("b@x", "B"))
+	c := ts.dial(t)
+	res, err := c.Erase(ctx(t), "INBOX", []Target{
+		{UID: uids[0], MessageID: "<a@x>"},
+		{UID: uids[1], MessageID: "<not-b@x>"}, // the UID now holds another message
+		{UID: 999, MessageID: "<gone@x>"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.Erased, uids[:1]) || !slices.Equal(res.Mismatched, uids[1:2]) || !slices.Equal(res.Missing, []uint32{999}) {
+		t.Fatalf("res=%+v", res)
+	}
+	left := ts.peek(t, "INBOX")
+	if _, ok := left[uids[1]]; !ok || len(left) != 1 || slices.Contains(left[uids[1]], imap.FlagDeleted) {
+		t.Fatalf("mismatched message touched: %v", left)
+	}
+}
+
+func TestEraseVerificationIsBatched(t *testing.T) {
+	ts := startServer(t, testOptions{})
+	var raws [][]byte
+	for i := 0; i < 300; i++ {
+		raws = append(raws, msg(fmt.Sprintf("m%d@x", i), "M"))
+	}
+	uids := ts.seed(t, "INBOX", raws...)
+	tg := ts.targets(t, "INBOX", uids)
+	c := ts.dial(t)
+	ts.resetCounts()
+	res, err := c.Erase(ctx(t), "INBOX", tg, false)
+	if err != nil || len(res.Erased) != 300 {
+		t.Fatalf("erased=%d err=%v", len(res.Erased), err)
+	}
+	ts.mu.Lock()
+	s, f := ts.searches, ts.fetches
+	ts.mu.Unlock()
+	if s > eraseAttempts || f > 1 {
+		t.Fatalf("verification not batched: %d searches, %d fetches", s, f)
+	}
+}
+
+func TestEraseReportsOnlyConfirmedOnVerifyError(t *testing.T) {
+	ts := startServer(t, testOptions{})
+	uids := ts.seed(t, "INBOX", msg("a@x", "A"), msg("b@x", "B"), msg("c@x", "C"))
+	tg := ts.targets(t, "INBOX", uids)
+	c := ts.dial(t)
+	ts.resetCounts()
+	// Attempt 1 leaves uids[0]; verify 1 sees it; attempt 2 removes it; verify 2 fails.
+	ts.set(func(ts *testServer) { ts.keepOnce = uids[0]; ts.failSearch = 2 })
+	res, err := c.Erase(ctx(t), "INBOX", tg, false)
+	if err == nil {
+		t.Fatal("expected verification error")
+	}
+	if !slices.Equal(res.Erased, uids[1:]) {
+		t.Fatalf("erased=%v, want only confirmed %v", res.Erased, uids[1:])
+	}
+}
+
+func TestEraseGmailReportsOnTrashVerifyError(t *testing.T) {
+	ts := startServer(t, testOptions{
+		boxes:   []string{"INBOX", gmTrash},
+		special: map[string]imap.MailboxAttr{gmTrash: imap.MailboxAttrTrash},
+	})
+	uids := ts.seed(t, "INBOX", msg("g1@x", "G1"), msg("g2@x", "G2"))
+	tg := ts.targets(t, "INBOX", uids)
+	c := ts.dial(t)
+	ts.resetCounts()
+	// Searches: 1 = move check in INBOX, 2 = Trash check after attempt 1 (Trash UID 1 kept),
+	// 3 = Trash check after attempt 2 -> fails.
+	ts.set(func(ts *testServer) { ts.keepOnce = 1; ts.failSearch = 3 })
+	res, err := c.Erase(ctx(t), "INBOX", tg, true)
+	if err == nil || !strings.Contains(err.Error(), "Trash") {
+		t.Fatalf("err=%v, want a Trash error", err)
+	}
+	if !slices.Equal(res.Erased, uids[1:]) {
+		t.Fatalf("erased=%v, want %v", res.Erased, uids[1:])
+	}
+}
+
+func TestEraseGmailMoveVerifyError(t *testing.T) {
+	ts := startServer(t, testOptions{
+		boxes:   []string{"INBOX", gmTrash},
+		special: map[string]imap.MailboxAttr{gmTrash: imap.MailboxAttrTrash},
+	})
+	uids := ts.seed(t, "INBOX", msg("g1@x", "G1"))
+	tg := ts.targets(t, "INBOX", uids)
+	c := ts.dial(t)
+	ts.resetCounts()
+	ts.set(func(ts *testServer) { ts.failSearch = 1 })
+	res, err := c.Erase(ctx(t), "INBOX", tg, true)
+	if err == nil || len(res.Erased) != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+}
+
+func TestEraseExpungeFailureClearsDeleted(t *testing.T) {
+	ts := startServer(t, testOptions{})
+	uids := ts.seed(t, "INBOX", msg("a@x", "A"))
+	tg := ts.targets(t, "INBOX", uids)
+	c := ts.dial(t)
+	ts.set(func(ts *testServer) { ts.failExpunge = true })
+	res, err := c.Erase(ctx(t), "INBOX", tg, false)
+	if err == nil || len(res.Erased) != 0 {
+		t.Fatalf("res=%+v err=%v", res, err)
+	}
+	if slices.Contains(ts.peek(t, "INBOX")[uids[0]], imap.FlagDeleted) {
+		t.Fatal("\\Deleted left on a message that was not erased")
+	}
+}
+
+func TestEraseRefusesChangedUIDValidity(t *testing.T) {
+	ts := startServer(t, testOptions{boxes: []string{"INBOX", "Box"}})
+	uids := ts.seed(t, "Box", msg("a@x", "A"))
+	c := ts.dial(t)
+	if _, found, err := c.Locate(ctx(t), "Box", "a@x", uids[0]); err != nil || !found {
+		t.Fatal(found, err)
+	}
+	// The mailbox is recreated: same name, same UID, new UIDVALIDITY.
+	if err := ts.user.Delete("Box"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ts.user.Create("Box", nil); err != nil {
+		t.Fatal(err)
+	}
+	uids2 := ts.seed(t, "Box", msg("a@x", "A again"))
+	if _, err := c.Erase(ctx(t), "Box", []Target{{UID: uids2[0], MessageID: "a@x"}}, false); err == nil {
+		t.Fatal("expected UIDVALIDITY refusal")
+	}
+	if len(ts.peek(t, "Box")) != 1 {
+		t.Fatal("message erased despite UIDVALIDITY change")
 	}
 }
