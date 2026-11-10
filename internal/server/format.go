@@ -141,10 +141,44 @@ func sanitizeName(name string, index int) string {
 	return name
 }
 
-// resolveDir validates a user-supplied save directory: it must be absolute (after
-// ~ expansion), live inside $HOME once symlinks are resolved, and avoid ~/Library
-// and any dot-prefixed component.
-func resolveDir(dir string) (string, error) {
+// saveRoots lists the folders save_attachment may write into: the download directory
+// plus any absolute paths from MAILKITE_SAVE_DIRS (colon-separated). Each root goes
+// through the same checks as a requested dir; invalid ones are dropped.
+func saveRoots(downloadDir string) []string {
+	var roots []string
+	cands := []string{downloadDir}
+	if env := os.Getenv("MAILKITE_SAVE_DIRS"); env != "" {
+		cands = append(cands, strings.Split(env, ":")...)
+	}
+	for _, c := range cands {
+		if c == "" || (!filepath.IsAbs(c) && !strings.HasPrefix(c, "~/")) {
+			continue
+		}
+		if r, err := cleanDir(c); err == nil {
+			roots = append(roots, r)
+		}
+	}
+	return roots
+}
+
+// resolveDir validates a user-supplied save directory: it must pass cleanDir and lie
+// inside one of the allowed roots (see saveRoots).
+func resolveDir(dir string, roots []string) (string, error) {
+	full, err := cleanDir(dir)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range roots {
+		if rel, err := filepath.Rel(r, full); err == nil && rel != ".." && !strings.HasPrefix(rel, "../") {
+			return full, nil
+		}
+	}
+	return "", errors.New("dir must be inside the downloads folder (or a folder from MAILKITE_SAVE_DIRS)")
+}
+
+// cleanDir expands ~, requires an absolute path, resolves symlinks, and rejects anything
+// outside $HOME, inside ~/Library, or with a dot-prefixed component.
+func cleanDir(dir string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return "", errors.New("cannot determine home directory")

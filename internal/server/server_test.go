@@ -326,15 +326,8 @@ func TestSaveAttachmentDirRestricted(t *testing.T) {
 	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
 		base64.StdEncoding.EncodeToString([]byte("X")) + "\r\n--B--\r\n"
 	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
-	for _, d := range []string{"rel/dir", "~", "~/Library/LaunchAgents", "~/library/LaunchAgents", "~/LIBRARY/x", "~/.ssh", "/tmp/x", "~/link/x", "~/Downloads/.hid", "~/../other"} {
+	for _, d := range []string{"rel/dir", "~", "~/Library/LaunchAgents", "~/library/LaunchAgents", "~/LIBRARY/x", "~/.ssh", "/tmp/x", "~/link/x", "~/Downloads/.hid", "~/../other", "~/GolandProjects/x", "~/Downloads/../Documents"} {
 		out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": d})
-		if d == "~" {
-			// the home directory itself is inside $HOME and allowed
-			if isErr {
-				t.Errorf("%q rejected: %s", d, out)
-			}
-			continue
-		}
 		if !isErr {
 			t.Errorf("dir %q accepted: %s", d, out)
 		}
@@ -351,6 +344,28 @@ func TestSaveAttachmentDirRestricted(t *testing.T) {
 	}
 	if fi, err := os.Stat(filepath.Join(home, "Downloads", "sub")); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Errorf("sub dir: %v %v", fi, err)
+	}
+}
+
+func TestSaveAttachmentExtraRoots(t *testing.T) {
+	e := setup(t)
+	home := os.Getenv("HOME")
+	for _, d := range []string{"extra", "Library/saves", ".hidden"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("MAILKITE_SAVE_DIRS", strings.Join([]string{filepath.Join(home, "extra"), filepath.Join(home, "Library", "saves"), filepath.Join(home, ".hidden"), "relative"}, ":"))
+	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		base64.StdEncoding.EncodeToString([]byte("X")) + "\r\n--B--\r\n"
+	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
+	if out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": "~/extra/deep"}); isErr {
+		t.Errorf("configured root rejected: %s", out)
+	}
+	for _, d := range []string{"~/Library/saves", "~/.hidden", "~/.hidden/x", "~/other"} {
+		if out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": d}); !isErr {
+			t.Errorf("dir %q accepted: %s", d, out)
+		}
 	}
 }
 

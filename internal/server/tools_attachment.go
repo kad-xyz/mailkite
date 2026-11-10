@@ -18,7 +18,7 @@ import (
 type saveInput struct {
 	ID    int64  `json:"id" jsonschema:"message id"`
 	Index *int   `json:"index,omitempty" jsonschema:"attachment number; omit for all"`
-	Dir   string `json:"dir,omitempty" jsonschema:"default ~/Downloads"`
+	Dir   string `json:"dir,omitempty" jsonschema:"inside ~/Downloads (default)"`
 }
 
 func (h *handlers) addSaveAttachment(srv *mcp.Server) {
@@ -48,7 +48,7 @@ func (h *handlers) addSaveAttachment(srv *mcp.Server) {
 			}
 			dir := h.opts.DownloadDir
 			if in.Dir != "" {
-				if dir, err = resolveDir(in.Dir); err != nil {
+				if dir, err = resolveDir(in.Dir, saveRoots(h.opts.DownloadDir)); err != nil {
 					return errResult(err)
 				}
 			}
