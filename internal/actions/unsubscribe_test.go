@@ -20,6 +20,7 @@ import (
 	"github.com/emersion/go-smtp"
 
 	"github.com/kad-xyz/mailkite/internal/config"
+	"github.com/kad-xyz/mailkite/internal/maildata"
 	"github.com/kad-xyz/mailkite/internal/message"
 	"github.com/kad-xyz/mailkite/internal/smtpx"
 )
@@ -479,5 +480,83 @@ func TestNoAutomaticSenderWithCleanup(t *testing.T) {
 	}
 	if len(p.Unsub) != 1 || p.Unsub[0].Method != "manual" || !strings.Contains(strings.Join(p.Skipped, "\n"), "use cleanup") {
 		t.Fatalf("preview %+v", p)
+	}
+}
+
+func TestCleanupWithUnsubscribeIsOnePlan(t *testing.T) {
+	v := newEnv(t)
+	s := newOneClick(t, v)
+	_, id1 := v.add(uuidA, "Shop <news@shop.example>", "Скидки 1", "x", msgOpt{headers: oneClickHeaders(s.URL + "/ok")})
+	_, id2 := v.add(uuidA, "Deals <deals@other.example>", "Скидки 2", "x", msgOpt{headers: oneClickHeaders(s.URL + "/ok2")})
+	_, keep := v.add(uuidA, "Shop <news@shop.example>", "Новости", "x", msgOpt{headers: oneClickHeaders(s.URL + "/ok")})
+	// The selection is the filter (subject), not all mail of these senders.
+	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Filter: maildata.Filter{Subject: "Скидки"}, Action: "erase", Unsubscribe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PlanID == "" || p.Count != 2 || len(p.Unsub) != 2 || p.Button != "Отписаться: 2 и стереть 2" {
+		t.Fatalf("preview %+v", p)
+	}
+	for _, u := range p.Unsub {
+		if u.Method != MethodOneClick {
+			t.Fatalf("unsub %+v", p.Unsub)
+		}
+	}
+	rep, err := v.e.Execute(ctxT(t), p.PlanID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.confirm.n != 1 || !strings.HasPrefix(v.confirm.body, "Отписаться от 2 отправителей и стереть насовсем 2 письма.") {
+		t.Fatalf("dialogs %d body %q", v.confirm.n, v.confirm.body)
+	}
+	if hits, _ := s.requests(); len(hits) != 2 {
+		t.Fatalf("posts %d", len(hits))
+	}
+	srv := v.srv["a@icloud.example"]
+	if srv.has("INBOX", id1) || srv.has("INBOX", id2) || !srv.has("INBOX", keep) {
+		t.Fatal("exactly the selection must be erased")
+	}
+	if rep.Done != 2 || len(rep.Unsubscribe) != 2 {
+		t.Fatalf("report %+v", rep)
+	}
+	if v.e.Plans.Len() != 0 {
+		t.Fatal("no stray plan may be left")
+	}
+}
+
+func TestCleanupUnsubscribeNeedsEraseOrTrash(t *testing.T) {
+	v := newEnv(t)
+	v.f.AddMailbox("imap://" + uuidA + "/Archive")
+	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "x", msgOpt{headers: oneClickHeaders("https://shop.example/u")})
+	for _, r := range []CleanupRequest{
+		{Senders: []string{"@shop.example"}, Action: "read", Unsubscribe: true},
+		{Senders: []string{"@shop.example"}, Action: "move", MoveTo: "Archive", Unsubscribe: true},
+	} {
+		if _, err := v.e.BuildCleanup(ctxT(t), r); err == nil || !strings.Contains(err.Error(), "unsubscribe needs action erase or trash") {
+			t.Fatalf("%s: %v", r.Action, err)
+		}
+	}
+	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Senders: []string{"@shop.example"}, Action: "trash", Unsubscribe: true})
+	if err != nil || p.PlanID == "" || p.Button != "Отписаться: 1 и в корзину 1" {
+		t.Fatalf("trash: %+v %v", p, err)
+	}
+}
+
+func TestCleanupUnsubscribeProtectedWarning(t *testing.T) {
+	v := newEnv(t)
+	h := oneClickHeaders("https://shop.example/u")
+	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "x", msgOpt{headers: h})
+	code, _ := v.add(uuidA, "Shop <news@shop.example>", "Ваш код подтверждения", "Никому не сообщайте", msgOpt{headers: h})
+	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Senders: []string{"@shop.example"}, Action: "erase", Unsubscribe: true, AllowProtected: []int64{code}})
+	if err != nil || p.Count != 2 {
+		t.Fatalf("p %+v err %v", p, err)
+	}
+	body := captureDialog(v)
+	if _, err := v.e.Execute(ctxT(t), p.PlanID); err != nil {
+		t.Fatal(err)
+	}
+	first, _, _ := strings.Cut(*body, "\nnews@")
+	if !strings.Contains(first, "в том числе защищённых: 1") {
+		t.Fatalf("warning must follow the first sentence: %q", *body)
 	}
 }

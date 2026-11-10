@@ -338,6 +338,53 @@ func (e *Engine) BuildUnsubscribe(ctx context.Context, senders []string, alsoCle
 	if alsoCleanup != "" && alsoCleanup != "erase" && alsoCleanup != "trash" {
 		return Preview{}, fmt.Errorf("also_cleanup must be erase or trash, not %q", alsoCleanup)
 	}
+	var cleanup func(specs []string) (Preview, *safety.Plan, error)
+	if alsoCleanup != "" {
+		cleanup = func(specs []string) (Preview, *safety.Plan, error) {
+			return e.takeCleanup(ctx, CleanupRequest{Senders: specs, Action: alsoCleanup})
+		}
+	}
+	return e.buildUnsub(ctx, senders, alsoCleanup, cleanup)
+}
+
+// cleanupAndUnsubscribe is BuildCleanup with Unsubscribe: the cleanup selection
+// (filter, senders, allowed protected messages) is built first, then its senders
+// are unsubscribed in the same plan and dialog. Only erase and trash combine.
+func (e *Engine) cleanupAndUnsubscribe(ctx context.Context, r CleanupRequest) (Preview, error) {
+	if r.Action != "erase" && r.Action != "trash" {
+		return Preview{}, errors.New("unsubscribe needs action erase or trash")
+	}
+	r.Unsubscribe = false
+	cp, cplan, err := e.takeCleanup(ctx, r)
+	if err != nil || cplan == nil {
+		return cp, err
+	}
+	senders := make([]string, 0, len(cp.BySender))
+	for _, s := range cp.BySender {
+		senders = append(senders, s.Sender)
+	}
+	return e.buildUnsub(ctx, senders, r.Action, func([]string) (Preview, *safety.Plan, error) { return cp, cplan, nil })
+}
+
+// takeCleanup builds a cleanup plan and takes it out of the plan store at once:
+// it only ever runs as part of an unsubscribe plan. The plan is nil when there is
+// nothing to clean up.
+func (e *Engine) takeCleanup(ctx context.Context, r CleanupRequest) (Preview, *safety.Plan, error) {
+	cp, err := e.BuildCleanup(ctx, r)
+	if err != nil || cp.PlanID == "" {
+		return cp, nil, err
+	}
+	cplan, err := e.Plans.Take(cp.PlanID, e.now())
+	if err != nil {
+		return Preview{}, nil, err
+	}
+	cp.PlanID = ""
+	return cp, &cplan, nil
+}
+
+// buildUnsub previews unsubscribing from senders; cleanup (nil: none) supplies the
+// cleanup part of the same plan.
+func (e *Engine) buildUnsub(ctx context.Context, senders []string, alsoCleanup string, cleanup func(specs []string) (Preview, *safety.Plan, error)) (Preview, error) {
 	var specs []string
 	seen := map[string]bool{}
 	for _, s := range senders {
@@ -411,19 +458,15 @@ func (e *Engine) BuildUnsubscribe(ctx context.Context, senders []string, alsoCle
 	}
 	x := unsubExtra{Items: items, Sources: sources}
 	cleanupSummary := ""
-	if alsoCleanup != "" {
-		cp, err := e.BuildCleanup(ctx, CleanupRequest{Senders: specs, Action: alsoCleanup, Unsubscribe: true})
+	if cleanup != nil {
+		cp, cplan, err := cleanup(specs)
 		if err != nil {
 			return Preview{}, err
 		}
 		p.Count, p.BySender, p.Protected = cp.Count, cp.BySender, cp.Protected
 		p.Skipped = append(p.Skipped, cp.Skipped...)
-		if cp.PlanID != "" {
+		if cplan != nil {
 			// The cleanup plan becomes part of this one: one plan, one dialog.
-			cplan, err := e.Plans.Take(cp.PlanID, e.now())
-			if err != nil {
-				return Preview{}, err
-			}
 			cx, ok := cplan.Extra.(planExtra)
 			if !ok {
 				return Preview{}, errors.New("internal: unexpected cleanup plan")

@@ -400,3 +400,18 @@ func TestStateDirNeedsHome(t *testing.T) {
 		t.Fatalf("explicit dir: %q %v", d, err)
 	}
 }
+
+func TestCleanupWithUnsubscribeTool(t *testing.T) {
+	w := setupWrite(t)
+	w.addBulk("news@shop.example", "Sale 1")
+	w.addBulk("news@shop.example", "Sale 2")
+	out, isErr := w.call(t, "cleanup", map[string]any{"senders": []string{"@shop.example"}, "action": "read", "unsubscribe": true})
+	if !isErr || !strings.Contains(out, "unsubscribe needs action erase or trash") {
+		t.Fatalf("read+unsubscribe: isErr=%v %q", isErr, out)
+	}
+	out, isErr = w.call(t, "cleanup", map[string]any{"senders": []string{"@shop.example"}, "action": "erase", "unsubscribe": true})
+	if isErr || !strings.Contains(out, "news@shop.example | oneclick") || !strings.Contains(out, "2 messages from 1 senders will also be cleaned up") {
+		t.Fatalf("erase+unsubscribe: isErr=%v %q", isErr, out)
+	}
+	planID(t, out)
+}

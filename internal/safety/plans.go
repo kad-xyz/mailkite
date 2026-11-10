@@ -81,6 +81,13 @@ func (ps *Plans) New(p Plan) string {
 	return id
 }
 
+// Len reports how many plans are stored.
+func (ps *Plans) Len() int {
+	ps.mu.Lock()
+	defer ps.mu.Unlock()
+	return len(ps.m)
+}
+
 // Take returns the plan and removes it, so a plan runs at most once. An expired
 // plan is removed too and reported as ErrPlanExpired.
 func (ps *Plans) Take(id string, now time.Time) (Plan, error) {

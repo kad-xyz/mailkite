@@ -133,12 +133,11 @@ var maxCleanup = 5000
 
 // planExtra is the Plan.Extra of cleanup and mark plans.
 type planExtra struct {
-	Op          string // erase|trash|read|unread|flag|unflag|move
-	MoveTo      string
-	Unsubscribe bool
-	Names       map[string]string // account UUID -> account name, for reports
-	Protected   int               // protected messages left out
-	Included    int               // protected messages included on request
+	Op        string // erase|trash|read|unread|flag|unflag|move
+	MoveTo    string
+	Names     map[string]string // account UUID -> account name, for reports
+	Protected int               // protected messages left out
+	Included  int               // protected messages included on request
 }
 
 func (e *Engine) now() time.Time {
@@ -426,6 +425,9 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 	if !hasConstraint(r) {
 		return Preview{}, errors.New("cleanup needs senders or a filter (from, subject, mailbox, dates, unread...); it never acts on all mail")
 	}
+	if r.Unsubscribe {
+		return e.cleanupAndUnsubscribe(ctx, r)
+	}
 	hidden, err := e.hidden(ctx)
 	if err != nil {
 		return Preview{}, err
@@ -454,7 +456,7 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 			return Preview{}, err
 		}
 	}
-	x := planExtra{Op: r.Action, MoveTo: r.MoveTo, Unsubscribe: r.Unsubscribe, Names: b.names,
+	x := planExtra{Op: r.Action, MoveTo: r.MoveTo, Names: b.names,
 		Protected: len(p.Protected), Included: b.included}
 	if err := e.store(&p, cleanupPrefix+r.Action, b, x); err != nil {
 		return Preview{}, err

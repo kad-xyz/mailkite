@@ -205,6 +205,9 @@ func (h *handlers) addWrite(srv *mcp.Server) {
 				if in.Action == "erase" {
 					h.erasePlans.add(p.PlanID)
 				}
+				if in.Unsubscribe {
+					return textResult(renderUnsub(p))
+				}
 				return textResult(renderPreview(p))
 			})
 		})
