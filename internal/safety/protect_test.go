@@ -93,6 +93,18 @@ func TestClassify(t *testing.T) {
 		{"pfr.gov.ru", "ПФР <x@mail.pfr.gov.ru>", bulkHeaders, "Акция", "Большая распродажа", config.Rules{}, "bank"},
 		{"sfr.gov.ru", "СФР <x@sfr.gov.ru>", bulkHeaders, "Акция", "Большая распродажа", config.Rules{}, "bank"},
 		{"notcbr.ru", "X <news@notcbr.ru>", bulkHeaders, "Акция", "Большая распродажа", config.Rules{}, ""},
+		{"koda", "Shop <news@shop.example>", bulkHeaders, "Введите кода нет", "Большая распродажа", config.Rules{}, "code"},
+		{"kodom", "Shop <news@shop.example>", bulkHeaders, "Вход по кодом", "Большая распродажа", config.Rules{}, "code"},
+		{"kodov", "Shop <news@shop.example>", bulkHeaders, "Список кодов", "Большая распродажа", config.Rules{}, "code"},
+		{"cheki", "Shop <news@shop.example>", bulkHeaders, "Чеки за октябрь", "Спасибо", config.Rules{}, "receipt"},
+		{"chekov", "Shop <news@shop.example>", bulkHeaders, "Архив чеков", "Спасибо", config.Rules{}, "receipt"},
+		{"scheta", "Shop <news@shop.example>", bulkHeaders, "Новости", "Пришли счета за месяц", config.Rules{}, "receipt"},
+		{"schyotom", "Shop <news@shop.example>", bulkHeaders, "Новости", "Что делать со счётом", config.Rules{}, "receipt"},
+		{"codes", "Shop <news@shop.example>", bulkHeaders, "Your codes", "Big sale", config.Rules{}, "code"},
+		{"pins", "Shop <news@shop.example>", bulkHeaders, "New pins", "Big sale", config.Rules{}, "code"},
+		{"kodeks", "Shop <news@shop.example>", bulkHeaders, "Трудовой кодекс", "Большая распродажа", config.Rules{}, ""},
+		{"chekap", "Shop <news@shop.example>", bulkHeaders, "Чекап здоровья", "Большая распродажа", config.Rules{}, ""},
+		{"kodirovka", "Shop <news@shop.example>", bulkHeaders, "Кодировка письма", "Большая распродажа", config.Rules{}, ""},
 		{"empty rule ignored", "Shop <news@shop.example>", bulkHeaders, "Скидки", "Большая распродажа", config.Rules{ProtectedKeywords: []string{""}, ProtectedDomains: []string{""}}, ""},
 	}
 	for _, c := range cases {

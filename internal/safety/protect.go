@@ -50,11 +50,12 @@ func (k keywords) match(hay string) bool {
 
 var (
 	codeKeywords = keywords{
-		words: []string{"код", "code", "pin"},
+		words: []string{"код", "кода", "коду", "кодом", "коды", "кодов", "code", "codes", "pin", "pins"},
 		subs:  []string{"пароль", "password", "вход в аккаунт", "sign-in", "security", "безопасност"},
 	}
 	receiptKeywords = keywords{
-		words: []string{"чек", "счет"}, // fold turns счёт into счет
+		words: []string{"чек", "чека", "чеку", "чеком", "чеки", "чеков", // fold turns ё into е:
+			"счет", "счета", "счету", "счетом", "счетов"},
 		stems: []string{"order", "заказ", "payment", "оплат", "billing", "statement", "выписк", "booking", "бронирован", "билет", "ticket"},
 		subs:  []string{"receipt", "офд", "кассов", "invoice", "квитанц"},
 	}
