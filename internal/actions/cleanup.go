@@ -54,6 +54,11 @@ type Engine struct {
 	Dial    func(ctx context.Context, a config.Account, password string) (IMAP, error) // nil: DialIMAP
 	POP     POPDeleter
 	Now     func() time.Time // nil: time.Now
+	// SendMail sends a mailto unsubscribe request; nil: smtpx.Send.
+	SendMail func(ctx context.Context, a config.Account, password, from string, to []string, raw []byte) error
+	Version  string // for the one-click User-Agent "mailkite/<version>"; "" means "dev"
+
+	testNet *testNet // tests only: lets one-click reach an httptest server
 }
 
 // CleanupRequest selects messages for a bulk action.
@@ -99,6 +104,7 @@ type Preview struct {
 	Skipped   []string
 	Button    string
 	Result    *Report
+	Unsub     []UnsubLine // unsubscribe previews: one line per requested sender
 }
 
 // Report is the outcome of Execute. PerAccount holds one line per account (by
@@ -107,6 +113,10 @@ type Report struct {
 	Done, NotFound, Failed int
 	PerAccount             []string
 	Cancelled              bool
+	// Unsubscribe has one line per requested sender of an unsubscribe plan:
+	// "<sender> | done", "| failed: <reason>", "| manual: <url>" or "| none".
+	// It is for the tool reply only, never for actions.log.
+	Unsubscribe []string
 }
 
 const (
@@ -557,6 +567,9 @@ func (e *Engine) Execute(ctx context.Context, planID string) (Report, error) {
 	}
 	if err := plan.Verify(plan.Action, plan.Account); err != nil {
 		return Report{}, err
+	}
+	if isUnsubAction(plan.Action) {
+		return e.executeUnsub(ctx, plan)
 	}
 	x, ok := plan.Extra.(planExtra)
 	if !ok || !(strings.HasPrefix(plan.Action, cleanupPrefix) || strings.HasPrefix(plan.Action, markPrefix)) {
