@@ -220,19 +220,23 @@ func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
-const selectSummary = `SELECT m.ROWID, coalesce(g.message_id_header,''), coalesce(m.date_received,0), coalesce(a.address,''), coalesce(a.comment,''),
+const summaryCols = `m.ROWID, coalesce(g.message_id_header,''), coalesce(m.date_received,0), coalesce(a.address,''), coalesce(a.comment,''),
 	coalesce(s.subject,''), m.mailbox, m.read, m.flagged, coalesce(m.size,0),
-	(SELECT count(*) FROM attachments t WHERE t.message = m.ROWID), m.list_id_hash IS NOT NULL, coalesce(m.unsubscribe_type,0)
-FROM messages m
+	(SELECT count(*) FROM attachments t WHERE t.message = m.ROWID), m.list_id_hash IS NOT NULL, coalesce(m.unsubscribe_type,0)`
+
+const summaryFrom = ` FROM messages m
 LEFT JOIN addresses a ON a.ROWID = m.sender
 LEFT JOIN subjects s ON s.ROWID = m.subject
 LEFT JOIN message_global_data g ON g.ROWID = m.global_message_id`
 
-// scanRow reads one selectSummary row; the mailbox is returned as its ROWID.
-func scanRow(sc interface{ Scan(...any) error }) (sm Summary, mbox int64, err error) {
+const selectSummary = "SELECT " + summaryCols + summaryFrom
+
+// scanRow reads one selectSummary row (plus any extra trailing columns); the mailbox is returned as its ROWID.
+func scanRow(sc interface{ Scan(...any) error }, extra ...any) (sm Summary, mbox int64, err error) {
 	var date int64
 	var read, flagged, listID bool
-	err = sc.Scan(&sm.ID, &sm.MessageID, &date, &sm.From, &sm.FromName, &sm.Subject, &mbox, &read, &flagged, &sm.Size, &sm.Attachments, &listID, &sm.Unsub)
+	dest := append([]any{&sm.ID, &sm.MessageID, &date, &sm.From, &sm.FromName, &sm.Subject, &mbox, &read, &flagged, &sm.Size, &sm.Attachments, &listID, &sm.Unsub}, extra...)
+	err = sc.Scan(dest...)
 	sm.Date = time.Unix(date, 0)
 	sm.Read, sm.Flagged, sm.ListID = read, flagged, listID
 	return
