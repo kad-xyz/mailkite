@@ -91,7 +91,13 @@ func keywordBoundaryOK(text string, s, e int) bool {
 	return true
 }
 
+// codeKeywords are the literals one of which every keywordRe match contains.
+var codeKeywords = []string{"код", "code", "пароль", "passcode", "password", "otp", "pin", "verification"}
+
 func findCodes(text string) []string {
+	if !mayContainFold(text, codeKeywords...) {
+		return nil
+	}
 	kws := keywordRe.FindAllStringIndex(text, -1)
 	if len(kws) == 0 {
 		return nil
@@ -168,13 +174,13 @@ func findCodes(text string) []string {
 func classify(text, u string) string {
 	s := text + " " + u
 	switch {
-	case unsubRe.MatchString(s):
+	case mayContainFold(s, "unsubscribe", "отпис", "optout", "opt-out") && unsubRe.MatchString(s):
 		return "unsubscribe"
-	case confirmRe.MatchString(s):
+	case mayContainFold(s, "confirm", "verify", "подтверд", "activate", "активир") && confirmRe.MatchString(s):
 		return "confirm"
-	case loginRe.MatchString(s):
+	case mayContainFold(s, "login", "sign in", "войти", "вход") && loginRe.MatchString(s):
 		return "login"
-	case resetRe.MatchString(s):
+	case mayContainFold(s, "reset", "сброс", "восстанов") && resetRe.MatchString(s):
 		return "reset"
 	}
 	return "other"
@@ -205,12 +211,8 @@ func nodeText(n *html.Node, sb *strings.Builder) {
 	}
 }
 
-func htmlLinks(src string) []Link {
-	if src == "" {
-		return nil
-	}
-	doc, err := html.Parse(strings.NewReader(src))
-	if err != nil {
+func htmlLinks(doc *html.Node) []Link {
+	if doc == nil {
 		return nil
 	}
 	var out []Link
@@ -236,7 +238,7 @@ func htmlLinks(src string) []Link {
 }
 
 func normalizeInline(s string) string {
-	return strings.TrimSpace(htmlSpaceRe.ReplaceAllString(invisibleRe.ReplaceAllString(s, ""), " "))
+	return strings.TrimSpace(collapseBytes(dropInvisible(s), isHTMLSpace))
 }
 
 func clip(s string) string {
@@ -257,7 +259,15 @@ func Extract(m *Message, htmlBody string) Extracted {
 	var ex Extracted
 	ex.Codes = findCodes(m.Text)
 
-	cands := htmlLinks(htmlBody)
+	var doc *html.Node
+	switch {
+	case htmlBody == "":
+	case htmlBody == m.html && m.doc != nil:
+		doc, m.doc = m.doc, nil // parsed for the text; not needed after this
+	default:
+		doc, _ = html.Parse(strings.NewReader(htmlBody))
+	}
+	cands := htmlLinks(doc)
 	for _, u := range textURLRe.FindAllString(m.Text, -1) {
 		cands = append(cands, Link{URL: strings.TrimRight(u, ".,;:!?)")})
 	}

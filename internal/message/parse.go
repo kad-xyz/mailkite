@@ -9,14 +9,15 @@ import (
 	"io"
 	"mime"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/charset"
 	"github.com/emersion/go-message/mail"
+	"golang.org/x/net/html"
 )
 
 // Part describes an attachment. Index is the position of the part among all
@@ -39,6 +40,7 @@ type Message struct {
 	ListUnsubscribePost              string
 
 	html string
+	doc  *html.Node // parsed html, kept when the text came from it
 }
 
 // HTML returns the raw HTML body, if the message has one.
@@ -232,7 +234,12 @@ func Parse(raw []byte) (*Message, error) {
 	if countNonSpace(plain) >= 20 || b.html == "" {
 		m.Text = plain
 	} else {
-		m.Text = HTMLToText(b.html)
+		if doc, err := html.Parse(strings.NewReader(b.html)); err != nil {
+			m.Text = normalize(b.html)
+		} else {
+			m.doc = doc
+			m.Text = docText(doc)
+		}
 		if m.Text == "" {
 			m.Text = plain
 		}
@@ -280,25 +287,119 @@ func PartData(raw []byte, index int) (string, []byte, error) {
 	return name, data, nil
 }
 
-var (
-	invisibleRe = regexp.MustCompile(`[\x{200b}\x{200c}\x{200d}\x{2060}\x{feff}\x{034f}\x{00ad}]`)
-	spacesRe    = regexp.MustCompile(`[ \t\f\v]+`)
-	manyNLRe    = regexp.MustCompile(`\n{3,}`)
-)
+// isInvisible reports zero-width and soft-hyphen runes that are dropped from text.
+func isInvisible(r rune) bool {
+	switch r {
+	case 0x200b, 0x200c, 0x200d, 0x2060, 0xfeff, 0x034f, 0x00ad:
+		return true
+	}
+	return false
+}
+
+// dropInvisible removes invisible runes; every other byte, valid UTF-8 or not, is kept.
+func dropInvisible(s string) string {
+	var b strings.Builder
+	start := 0
+	for i := 0; i < len(s); {
+		if s[i] < utf8.RuneSelf {
+			i++
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if isInvisible(r) {
+			if b.Cap() == 0 {
+				b.Grow(len(s))
+			}
+			b.WriteString(s[start:i])
+			start = i + size
+		}
+		i += size
+	}
+	if start == 0 {
+		return s
+	}
+	b.WriteString(s[start:])
+	return b.String()
+}
+
+// collapseBytes replaces every run of bytes for which in returns true with one space.
+// in must only accept ASCII bytes, so multi-byte sequences are never split.
+func collapseBytes(s string, in func(byte) bool) string {
+	var b strings.Builder
+	start := 0
+	for i := 0; i < len(s); {
+		if !in(s[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(s) && in(s[j]) {
+			j++
+		}
+		if j-i == 1 && s[i] == ' ' {
+			i = j
+			continue // already a single space
+		}
+		if b.Cap() == 0 {
+			b.Grow(len(s))
+		}
+		b.WriteString(s[start:i])
+		b.WriteByte(' ')
+		start, i = j, j
+	}
+	if start == 0 {
+		return s
+	}
+	b.WriteString(s[start:])
+	return b.String()
+}
+
+func isHSpace(c byte) bool { return c == ' ' || c == '\t' || c == '\f' || c == '\v' }
+
+func isHTMLSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f'
+}
+
+// squeezeNewlines turns every run of 3+ newlines into exactly two.
+func squeezeNewlines(s string) string {
+	if !strings.Contains(s, "\n\n\n") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '\n' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		j := i
+		for j < len(s) && s[j] == '\n' {
+			j++
+		}
+		if j-i >= 3 {
+			b.WriteString("\n\n")
+		} else {
+			b.WriteString(s[i:j])
+		}
+		i = j
+	}
+	return b.String()
+}
 
 // normalize collapses whitespace: runs of spaces to one, lines trimmed,
 // 3+ newlines to 2.
 func normalize(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
-	s = invisibleRe.ReplaceAllString(s, "")
-	s = strings.ReplaceAll(s, " ", " ")
-	s = spacesRe.ReplaceAllString(s, " ")
+	s = dropInvisible(s)
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = collapseBytes(s, isHSpace)
 	lines := strings.Split(s, "\n")
 	for i, l := range lines {
 		lines[i] = strings.TrimSpace(l)
 	}
 	s = strings.Join(lines, "\n")
-	s = manyNLRe.ReplaceAllString(s, "\n\n")
+	s = squeezeNewlines(s)
 	return strings.TrimSpace(s)
 }

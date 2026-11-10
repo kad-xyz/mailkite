@@ -14,8 +14,6 @@ var (
 	softHiddenRe = regexp.MustCompile(`(?i)((max-height|font-size)\s*:\s*0(px|pt|em|rem|%)?\s*(;|!|$)|opacity\s*:\s*0(\.0+)?\s*(;|!|$))`)
 )
 
-var htmlSpaceRe = regexp.MustCompile(`[ \t\r\n\f]+`)
-
 func hasElementChild(n *html.Node) bool {
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type == html.ElementNode {
@@ -31,12 +29,29 @@ func isHidden(n *html.Node) bool {
 		case "hidden":
 			return true
 		case "style":
-			if hardHiddenRe.MatchString(a.Val) {
+			if mayContainFold(a.Val, "display", "visibility") && hardHiddenRe.MatchString(a.Val) {
 				return true
 			}
-			if softHiddenRe.MatchString(a.Val) && !hasElementChild(n) {
+			if mayContainFold(a.Val, "max-height", "font-size", "opacity") && softHiddenRe.MatchString(a.Val) && !hasElementChild(n) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// mayContainFold is a cheap prefilter for a case-insensitive regexp whose every match
+// contains one of lits (given in lower case, ASCII or Cyrillic): false means the regexp
+// cannot match s. Runes that case-fold to these letters without being their upper case
+// (U+017F long s, U+1C80..U+1C88 Cyrillic variants) make it answer true.
+func mayContainFold(s string, lits ...string) bool {
+	if strings.ContainsFunc(s, func(r rune) bool { return r == 0x17f || (r >= 0x1c80 && r <= 0x1c88) }) {
+		return true
+	}
+	low := strings.ToLower(s)
+	for _, l := range lits {
+		if strings.Contains(low, l) {
+			return true
 		}
 	}
 	return false
@@ -70,7 +85,7 @@ func (t *textBuilder) nl(n int) {
 func (t *textBuilder) walk(n *html.Node) {
 	switch n.Type {
 	case html.TextNode:
-		t.sb.WriteString(htmlSpaceRe.ReplaceAllString(n.Data, " "))
+		t.sb.WriteString(collapseBytes(n.Data, isHTMLSpace))
 		return
 	case html.ElementNode:
 		if skipTag(n.DataAtom) || isHidden(n) {
@@ -117,6 +132,10 @@ func HTMLToText(src string) string {
 	if err != nil {
 		return normalize(src)
 	}
+	return docText(doc)
+}
+
+func docText(doc *html.Node) string {
 	var t textBuilder
 	t.walk(doc)
 	return normalize(t.sb.String())
