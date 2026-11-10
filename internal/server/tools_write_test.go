@@ -135,13 +135,13 @@ func setupWrite(t *testing.T) *wenv {
 	w := &wenv{imap: newFakeIMAP(), confirm: &fakeConfirm{answer: true}, stateDir: t.TempDir()}
 	w.archive = filepath.Join(w.stateDir, "archive")
 	cfg := &config.Config{MarkLimit: 20, Accounts: []config.Account{
-		{MailUUID: "A", Email: "me@x.com", Kind: "imap", IMAPHost: "imap.x", IMAPPort: 993}}}
+		{MailUUID: "A", Email: "me@x.example", Kind: "imap", IMAPHost: "imap.x", IMAPPort: 993}}}
 	plans := &safety.Plans{}
 	var eng *actions.Engine
 	opts := Options{DownloadDir: filepath.Join(home, "Downloads"), StateDir: w.stateDir, Version: "test",
 		Engine: func(st *maildata.Store, state *safety.State) (*actions.Engine, error) {
 			if eng == nil {
-				eng = &actions.Engine{Store: st, Cfg: cfg, Secrets: fakeSecrets{"me@x.com": "pw"}, Plans: plans,
+				eng = &actions.Engine{Store: st, Cfg: cfg, Secrets: fakeSecrets{"me@x.example": "pw"}, Plans: plans,
 					Confirm: w.confirm, Archive: &safety.Archive{Dir: w.archive}, State: state, POP: fakePOP{},
 					Dial: func(context.Context, config.Account, string) (actions.IMAP, error) { return fakeConn{w.imap}, nil }}
 			}
@@ -158,7 +158,7 @@ func setupWrite(t *testing.T) *wenv {
 // addBulk adds a non-protected newsletter message that exists on the fake server too.
 func (w *wenv) addBulk(from, subj string) (int64, string) {
 	id := "<" + strings.ReplaceAll(subj, " ", "-") + "@shop.example>"
-	raw := []byte("From: " + from + "\r\nTo: me@x.com\r\n" + bulkHdr + "Subject: " + subj + "\r\nMessage-ID: " + id +
+	raw := []byte("From: " + from + "\r\nTo: me@x.example\r\n" + bulkHdr + "Subject: " + subj + "\r\nMessage-ID: " + id +
 		"\r\nDate: Mon, 09 Nov 2026 10:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhello\r\n")
 	uid := w.imap.add("INBOX", id, raw)
 	rowid := w.f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: from, Subject: subj, MessageID: id,
@@ -225,7 +225,7 @@ func TestCleanupPreviewFormat(t *testing.T) {
 	w.addBulk("deals@other.example", "Deal")
 	// a protected one: from a person, no list markers
 	w.add("Hi there", "lunch?")
-	out, isErr := w.call(t, "cleanup", map[string]any{"senders": []string{"@shop.example", "@other.example", "bob@x.com"}, "action": "erase"})
+	out, isErr := w.call(t, "cleanup", map[string]any{"senders": []string{"@shop.example", "@other.example", "bob@x.example"}, "action": "erase"})
 	if isErr {
 		t.Fatalf("error: %q", out)
 	}

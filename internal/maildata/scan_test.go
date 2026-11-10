@@ -10,14 +10,14 @@ import (
 func TestScanSinceAndLiveIDs(t *testing.T) {
 	f := testfixture.New(t)
 	f.AddAccount("A", "Work", "IMAP")
-	a := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "x@y.com", Subject: "one", To: []string{"p@q.com", "r@q.com"}, Attachments: []string{"f.pdf"}})
-	b := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Trash", From: "x@y.com", Subject: "two"})
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "x@y.com", Subject: "dead", Deleted: true})
+	a := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "x@y.example", Subject: "one", To: []string{"p@q.example", "r@q.example"}, Attachments: []string{"f.pdf"}})
+	b := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Trash", From: "x@y.example", Subject: "two"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "x@y.example", Subject: "dead", Deleted: true})
 	s := openFix(t, f)
 	var ids []int64
 	err := s.ScanSince(ctx, 0, func(sm Summary, mb Mailbox, to, att []string) error {
 		ids = append(ids, sm.ID)
-		if sm.ID == a && (!slices.Equal(to, []string{"p@q.com", "r@q.com"}) || !slices.Equal(att, []string{"f.pdf"})) {
+		if sm.ID == a && (!slices.Equal(to, []string{"p@q.example", "r@q.example"}) || !slices.Equal(att, []string{"f.pdf"})) {
 			t.Errorf("to=%v att=%v", to, att)
 		}
 		return nil

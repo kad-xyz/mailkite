@@ -84,8 +84,8 @@ func (e *env) call(t *testing.T, name string, args map[string]any) (string, bool
 }
 
 func (e *env) add(subj, body string, extra ...func(*testfixture.FixtureMsg)) int64 {
-	raw := "From: Bob <bob@x.com>\r\nTo: me@x.com\r\nSubject: " + subj + "\r\nMessage-ID: <" + strings.ReplaceAll(subj, " ", "-") + "@x.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
-	m := testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "bob@x.com", FromName: "Bob", Subject: subj,
+	raw := "From: Bob <bob@x.example>\r\nTo: me@x.example\r\nSubject: " + subj + "\r\nMessage-ID: <" + strings.ReplaceAll(subj, " ", "-") + "@x.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
+	m := testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "bob@x.example", FromName: "Bob", Subject: subj,
 		Raw: []byte(raw), Received: time.Date(2026, 3, 5, 14, 30, 0, 0, time.Local)}
 	for _, fn := range extra {
 		fn(&m)
@@ -149,14 +149,14 @@ func TestFindQueryRanks(t *testing.T) {
 
 func TestReadTool(t *testing.T) {
 	e := setup(t)
-	raw := "From: Shop <shop@x.com>\r\nTo: me@x.com\r\nSubject: Your code\r\nMessage-ID: <abc+1@x.com>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
-		`<p>Your verification code: 481516</p><a href="https://x.com/unsub?u=1">Unsubscribe</a> <a href="https://www.shop.com/deals/long/path">Deals</a>` + "\r\n"
+	raw := "From: Shop <shop@x.example>\r\nTo: me@x.example\r\nSubject: Your code\r\nMessage-ID: <abc+1@x.example>\r\nMIME-Version: 1.0\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		`<p>Your verification code: 481516</p><a href="https://x.example/unsub?u=1">Unsubscribe</a> <a href="https://www.shop.example/deals/long/path">Deals</a>` + "\r\n"
 	id := e.add("Your code", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
 	out, isErr := e.call(t, "read", map[string]any{"id": id})
 	if isErr {
 		t.Fatal(out)
 	}
-	for _, w := range []string{"From: Shop", "Subject: Your code", "open: message://%3Cabc+1@x.com%3E", "codes: 481516", "- [unsubscribe] Unsubscribe → https://x.com/unsub?u=1", "- Deals (shop.com)"} {
+	for _, w := range []string{"From: Shop", "Subject: Your code", "open: message://%3Cabc+1@x.example%3E", "codes: 481516", "- [unsubscribe] Unsubscribe → https://x.example/unsub?u=1", "- Deals (shop.example)"} {
 		if !strings.Contains(out, w) {
 			t.Errorf("missing %q in\n%s", w, out)
 		}
@@ -212,7 +212,7 @@ func TestReadPaging(t *testing.T) {
 
 func TestSaveAttachmentNoOverwrite(t *testing.T) {
 	e := setup(t)
-	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n--B\r\nContent-Type: application/pdf; name=\"../.evil.pdf\"\r\nContent-Disposition: attachment; filename=\"../.evil.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+	raw := "From: a@x.example\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n--B\r\nContent-Type: application/pdf; name=\"../.evil.pdf\"\r\nContent-Disposition: attachment; filename=\"../.evil.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
 		base64.StdEncoding.EncodeToString([]byte("PDFDATA")) + "\r\n--B--\r\n"
 	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw); m.Attachments = []string{"evil.pdf"} })
 	var paths []string
@@ -260,7 +260,7 @@ func TestSendersAndStatus(t *testing.T) {
 	e.add("s1", "b", func(m *testfixture.FixtureMsg) { m.ListID = true; m.UnsubType = 1 })
 	e.add("s2", "b", func(m *testfixture.FixtureMsg) { m.Read = true })
 	out, _ := e.call(t, "senders", nil)
-	if !strings.HasPrefix(out, "2 (1 unread) | Bob bob@x.com | last 05.03") || !strings.Contains(out, "| list") || !strings.Contains(out, "| unsub") {
+	if !strings.HasPrefix(out, "2 (1 unread) | Bob bob@x.example | last 05.03") || !strings.Contains(out, "| list") || !strings.Contains(out, "| unsub") {
 		t.Errorf("senders %q", out)
 	}
 	out, isErr := e.call(t, "status", nil)
@@ -308,7 +308,7 @@ func TestSaveAttachmentDirRestricted(t *testing.T) {
 	if err := os.Symlink(filepath.Join(home, "Library"), filepath.Join(home, "lib2")); err != nil {
 		t.Fatal(err)
 	}
-	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+	raw := "From: a@x.example\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
 		base64.StdEncoding.EncodeToString([]byte("X")) + "\r\n--B--\r\n"
 	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
 	for _, d := range []string{"rel/dir", "~", "~/Library/LaunchAgents", "~/library/LaunchAgents", "~/LIBRARY/x", "~/.ssh", "/tmp/x", "~/link/x", "~/Downloads/.hid", "~/../other", "~/GolandProjects/x", "~/Downloads/../Documents"} {
@@ -341,7 +341,7 @@ func TestSaveAttachmentExtraRoots(t *testing.T) {
 		}
 	}
 	t.Setenv("MAILKITE_SAVE_DIRS", strings.Join([]string{filepath.Join(home, "extra"), filepath.Join(home, "Library", "saves"), filepath.Join(home, ".hidden"), "relative"}, ":"))
-	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+	raw := "From: a@x.example\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
 		base64.StdEncoding.EncodeToString([]byte("X")) + "\r\n--B--\r\n"
 	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
 	if out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": "~/extra/deep"}); isErr {
@@ -356,7 +356,7 @@ func TestSaveAttachmentExtraRoots(t *testing.T) {
 
 func TestSavePartialAttachments(t *testing.T) {
 	e := setup(t)
-	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n" +
+	raw := "From: a@x.example\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n" +
 		"--B\r\nContent-Type: application/pdf; name=\"s.pdf\"\r\nContent-Disposition: attachment; filename=\"s.pdf\"\r\n\r\n\r\n" +
 		"--B\r\nContent-Type: application/pdf; name=\"s.pdf\"\r\nContent-Disposition: attachment; filename=\"s.pdf\"\r\n\r\n\r\n--B--\r\n"
 	id := e.add("att", "", func(m *testfixture.FixtureMsg) {
@@ -390,7 +390,7 @@ func TestReadCacheSeesChangedFile(t *testing.T) {
 	if out, _ := e.call(t, "read", map[string]any{"id": id}); !strings.Contains(out, "first body text") {
 		t.Fatalf("first read: %q", out)
 	}
-	raw := "From: a@x.com\r\nSubject: cached\r\n\r\nsecond, longer body text\r\n"
+	raw := "From: a@x.example\r\nSubject: cached\r\n\r\nsecond, longer body text\r\n"
 	for _, p := range globEmlx(t, e.f.Root) {
 		if err := os.WriteFile(p, []byte(fmt.Sprintf("%d\n%s<plist/>", len(raw), raw)), 0o600); err != nil {
 			t.Fatal(err)

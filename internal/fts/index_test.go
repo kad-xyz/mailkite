@@ -33,8 +33,8 @@ func setup(t *testing.T) (*testfixture.Fixture, *maildata.Store, *Index) {
 }
 
 func add(f *testfixture.Fixture, subj, body string) int64 {
-	raw := "From: a@x.com\r\nSubject: " + subj + "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
-	return f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: subj, Raw: []byte(raw)})
+	raw := "From: a@x.example\r\nSubject: " + subj + "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + body + "\r\n"
+	return f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.example", Subject: subj, Raw: []byte(raw)})
 }
 
 func search(t *testing.T, ix *Index, q string) []int64 {
@@ -186,8 +186,8 @@ func TestSearchFields(t *testing.T) {
 
 func TestPartialEmlxIndexedNotPending(t *testing.T) {
 	f, st, ix := setup(t)
-	raw := []byte("From: a@x.com\r\nSubject: p\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\npartialword\r\n")
-	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "p", Raw: raw, Partial: true})
+	raw := []byte("From: a@x.example\r\nSubject: p\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\npartialword\r\n")
+	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.example", Subject: "p", Raw: raw, Partial: true})
 	mustSync(t, ix, st)
 	if got := search(t, ix, "partialword"); !slices.Equal(got, []int64{id}) {
 		t.Errorf("partial body not indexed: %v", got)
@@ -234,7 +234,7 @@ func TestMissingEmlxRetried(t *testing.T) {
 
 func TestPendingDroppedOnPrune(t *testing.T) {
 	f, st, ix := setup(t)
-	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "p", Partial: true})
+	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.example", Subject: "p", Partial: true})
 	mustSync(t, ix, st)
 	f.RemoveMessage(id)
 	agePending(t, ix)
@@ -246,7 +246,7 @@ func TestPendingDroppedOnPrune(t *testing.T) {
 
 func TestDeletedNotIndexed(t *testing.T) {
 	f, st, ix := setup(t)
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "ghost", Deleted: true})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.example", Subject: "ghost", Deleted: true})
 	if a, _ := mustSync(t, ix, st); a != 0 {
 		t.Errorf("added=%d", a)
 	}

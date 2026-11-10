@@ -34,7 +34,7 @@ func TestFindDefaultOrderAndLimit(t *testing.T) {
 		if i%2 == 1 {
 			u = "imap://B/INBOX"
 		}
-		f.AddMessage(testfixture.FixtureMsg{MailboxURL: u, From: "x@y.com", Subject: "s", Received: tm(i)})
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: u, From: "x@y.example", Subject: "s", Received: tm(i)})
 	}
 	s := openFix(t, f)
 	items, more, err := s.Find(ctx, Filter{Limit: 2})
@@ -129,7 +129,7 @@ func TestFindExcludesTrashAndDeleted(t *testing.T) {
 func TestFindFilters(t *testing.T) {
 	f := testfixture.New(t)
 	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "no-reply@gosuslugi.ru", FromName: "Госуслуги", Subject: "Выписка из реестра", Received: tm(1), Attachments: []string{"a.pdf"}})
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "bob@x.com", Subject: "hello", Received: tm(5), Read: true, Flagged: true})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "bob@x.example", Subject: "hello", Received: tm(5), Read: true, Flagged: true})
 	s := openFix(t, f)
 	check := func(name string, fl Filter, want string) {
 		t.Helper()
@@ -162,35 +162,35 @@ func TestFindFilters(t *testing.T) {
 func TestSenders(t *testing.T) {
 	f := testfixture.New(t)
 	for i := 0; i < 3; i++ {
-		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@news.com", FromName: "News", Subject: "n", ListID: true, UnsubType: 1, Read: i == 0, Received: tm(i)})
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@news.example", FromName: "News", Subject: "n", ListID: true, UnsubType: 1, Read: i == 0, Received: tm(i)})
 	}
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "b@x.com", Subject: "b", Read: true, Received: tm(9)})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "b@x.example", Subject: "b", Read: true, Received: tm(9)})
 	s := openFix(t, f)
 	g, err := s.Senders(ctx, Filter{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g) != 2 || g[0].Address != "a@news.com" || g[0].Count != 3 || g[0].Unread != 2 || !g[0].ListID || g[0].Unsub != 1 || g[0].Name != "News" || !g[0].Last.Equal(tm(2)) {
+	if len(g) != 2 || g[0].Address != "a@news.example" || g[0].Count != 3 || g[0].Unread != 2 || !g[0].ListID || g[0].Unsub != 1 || g[0].Name != "News" || !g[0].Last.Equal(tm(2)) {
 		t.Fatalf("%+v", g)
 	}
-	if g[1].Address != "b@x.com" || g[1].Count != 1 || g[1].ListID {
+	if g[1].Address != "b@x.example" || g[1].Count != 1 || g[1].ListID {
 		t.Errorf("%+v", g[1])
 	}
 	g, err = s.Senders(ctx, Filter{}, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g) != 1 || g[0].Address != "a@news.com" {
+	if len(g) != 1 || g[0].Address != "a@news.example" {
 		t.Errorf("minCount: %+v", g)
 	}
 }
 
 func TestGet(t *testing.T) {
 	f := testfixture.New(t)
-	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "s", MessageID: "<m@x>"})
+	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.example", Subject: "s", MessageID: "<m@x>"})
 	s := openFix(t, f)
 	sm, mb, err := s.Get(ctx, id)
-	if err != nil || sm.MessageID != "<m@x>" || mb.Role != RoleInbox || sm.From != "a@x.com" {
+	if err != nil || sm.MessageID != "<m@x>" || mb.Role != RoleInbox || sm.From != "a@x.example" {
 		t.Fatalf("%+v %+v %v", sm, mb, err)
 	}
 	if _, _, err := s.Get(ctx, 9999); !errors.Is(err, ErrNotFound) {
@@ -298,19 +298,19 @@ func TestAccountsSkipAllMailCounts(t *testing.T) {
 
 func TestSendersDefaultSkipsSentAndDrafts(t *testing.T) {
 	f := testfixture.New(t)
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "in@x.com", Subject: "i"})
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Sent%20Messages", From: "me@x.com", Subject: "s"})
-	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Drafts", From: "me@x.com", Subject: "d"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "in@x.example", Subject: "i"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Sent%20Messages", From: "me@x.example", Subject: "s"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Drafts", From: "me@x.example", Subject: "d"})
 	s := openFix(t, f)
 	g, err := s.Senders(ctx, Filter{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(g) != 1 || g[0].Address != "in@x.com" {
+	if len(g) != 1 || g[0].Address != "in@x.example" {
 		t.Errorf("default: %+v", g)
 	}
 	g, err = s.Senders(ctx, Filter{Role: RoleSent}, 0)
-	if err != nil || len(g) != 1 || g[0].Address != "me@x.com" {
+	if err != nil || len(g) != 1 || g[0].Address != "me@x.example" {
 		t.Errorf("explicit sent: %+v %v", g, err)
 	}
 }

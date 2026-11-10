@@ -911,18 +911,18 @@ func TestAllowProtected(t *testing.T) {
 
 func TestFromAddressIsExact(t *testing.T) {
 	v := newEnv(t)
-	v.add(uuidA, "A <a@x.com>", "Скидки", "Распродажа", msgOpt{})
-	v.add(uuidA, "AA <aa@x.com>", "Скидки", "Распродажа", msgOpt{})
+	v.add(uuidA, "A <a@x.example>", "Скидки", "Распродажа", msgOpt{})
+	v.add(uuidA, "AA <aa@x.example>", "Скидки", "Распродажа", msgOpt{})
 	for _, r := range []CleanupRequest{
-		{Filter: maildata.Filter{From: "A@X.com"}, Action: "erase"},
-		{Senders: []string{"a@x.com"}, Action: "erase"},
+		{Filter: maildata.Filter{From: "A@x.example"}, Action: "erase"},
+		{Senders: []string{"a@x.example"}, Action: "erase"},
 	} {
 		p, err := v.e.BuildCleanup(ctxT(t), r)
-		if err != nil || p.Count != 1 || p.BySender[0].Sender != "a@x.com" {
+		if err != nil || p.Count != 1 || p.BySender[0].Sender != "a@x.example" {
 			t.Fatalf("%+v: %+v %v", r, p, err)
 		}
 	}
-	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Filter: maildata.Filter{From: "x.com"}, Action: "erase"})
+	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Filter: maildata.Filter{From: "x.example"}, Action: "erase"})
 	if err != nil || p.Count != 2 {
 		t.Fatalf("substring From still works for non-addresses: %+v %v", p, err)
 	}
@@ -930,7 +930,7 @@ func TestFromAddressIsExact(t *testing.T) {
 
 func TestFromAndSendersCombine(t *testing.T) {
 	v := newEnv(t)
-	v.add(uuidA, "A <a@x.com>", "Скидки", "Распродажа", msgOpt{})
+	v.add(uuidA, "A <a@x.example>", "Скидки", "Распродажа", msgOpt{})
 	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "Распродажа", msgOpt{})
 	v.add(uuidA, "Shop <deals@shop.example>", "Скидки", "Распродажа", msgOpt{})
 	count := func(r CleanupRequest) int {
@@ -941,7 +941,7 @@ func TestFromAndSendersCombine(t *testing.T) {
 		}
 		return p.Count
 	}
-	if n := count(CleanupRequest{Senders: []string{"@shop.example"}, Filter: maildata.Filter{From: "a@x.com"}, Action: "erase"}); n != 0 {
+	if n := count(CleanupRequest{Senders: []string{"@shop.example"}, Filter: maildata.Filter{From: "a@x.example"}, Action: "erase"}); n != 0 {
 		t.Fatalf("a filter must never widen the selection: %d", n)
 	}
 	if n := count(CleanupRequest{Senders: []string{"@shop.example"}, Filter: maildata.Filter{From: "NEWS@shop.example"}, Action: "erase"}); n != 1 {
@@ -950,7 +950,7 @@ func TestFromAndSendersCombine(t *testing.T) {
 	if n := count(CleanupRequest{Senders: []string{"@shop.example"}, Action: "erase"}); n != 2 {
 		t.Fatalf("senders alone: %d", n)
 	}
-	if n := count(CleanupRequest{Filter: maildata.Filter{From: "a@x.com"}, Action: "erase"}); n != 1 {
+	if n := count(CleanupRequest{Filter: maildata.Filter{From: "a@x.example"}, Action: "erase"}); n != 1 {
 		t.Fatalf("from alone: %d", n)
 	}
 }
