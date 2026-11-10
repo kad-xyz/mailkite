@@ -26,6 +26,7 @@ func TestSaveRoundTripPerms(t *testing.T) {
 	}
 	in.Accounts[0].MailUUID = "U1"
 	in.Accounts[0].Email = "me@icloud.example"
+	in.Accounts[0].Kind = "imap"
 	if err := in.Save(p); err != nil {
 		t.Fatal(err)
 	}
@@ -73,5 +74,38 @@ func TestPresets(t *testing.T) {
 	g := Presets["gmail"]
 	if g.IMAPHost != "imap.gmail.com" || g.SMTPHost != "smtp.gmail.com" || g.SMTPPort != 465 || g.SMTPTLS != "tls" || !g.Gmail {
 		t.Fatalf("%+v", g)
+	}
+}
+
+func TestLoadValidates(t *testing.T) {
+	good := Account{MailUUID: "u", Email: "a@x", Kind: "imap", IMAPHost: "h", IMAPPort: 993, SMTPHost: "s", SMTPPort: 465, SMTPTLS: "tls"}
+	cases := map[string]func(a *Account){
+		"email":    func(a *Account) { a.Email = "" },
+		"kind":     func(a *Account) { a.Kind = "ews" },
+		"imaphost": func(a *Account) { a.IMAPHost = "" },
+		"imapport": func(a *Account) { a.IMAPPort = 0 },
+		"tls":      func(a *Account) { a.SMTPTLS = "ssl" },
+		"smtpport": func(a *Account) { a.SMTPPort = 70000 },
+	}
+	for name, mut := range cases {
+		a := good
+		mut(&a)
+		p := filepath.Join(t.TempDir(), "c.json")
+		if err := (&Config{Accounts: []Account{a}, MarkLimit: 20}).Save(p); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(p); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+	p := filepath.Join(t.TempDir(), "c.json")
+	(&Config{Accounts: []Account{good}}).Save(p)
+	if _, err := Load(p); err != nil {
+		t.Fatal(err)
+	}
+	pop := Account{Email: "a@x", Kind: "pop", SMTPHost: "s", SMTPPort: 587, SMTPTLS: "starttls"}
+	(&Config{Accounts: []Account{pop}}).Save(p)
+	if _, err := Load(p); err != nil {
+		t.Fatal(err)
 	}
 }

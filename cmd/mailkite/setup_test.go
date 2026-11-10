@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,6 +71,45 @@ func TestSetupManualPOP(t *testing.T) {
 
 func TestSetupBadNumber(t *testing.T) {
 	err := runSetup(context.Background(), strings.NewReader("9\n"), &bytes.Buffer{}, lister, &fakeStore{}, nil, filepath.Join(t.TempDir(), "c.json"))
+	if err == nil {
+		t.Fatal("want error")
+	}
+}
+
+func TestSetupVerifyFailure(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	verify := func(context.Context, config.Account, string) error { return errors.New("bad creds") }
+	var out bytes.Buffer
+	err := runSetup(context.Background(), strings.NewReader("1\nme@icloud.example\nicloud\n"), &out, lister, &fakeStore{}, verify, p)
+	if err == nil {
+		t.Fatal("want error")
+	}
+	if _, serr := os.Stat(p); serr == nil {
+		t.Fatal("config saved")
+	}
+	for _, w := range []string{"login failed: bad creds", "security delete-generic-password -s mailkite -a me@icloud.example", "mailkite setup"} {
+		if !strings.Contains(out.String(), w) {
+			t.Errorf("output missing %q:\n%s", w, out.String())
+		}
+	}
+}
+
+func TestSetupGmailCaseInsensitive(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := runSetup(context.Background(), strings.NewReader("1\ng@gmail.example\nGMAIL\n"), &bytes.Buffer{}, lister, &fakeStore{}, nil, p); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := config.Load(p)
+	a := c.Accounts[0]
+	if !a.Gmail || a.IMAPHost != "imap.gmail.com" || a.SMTPPort != 465 || a.SMTPTLS != "tls" {
+		t.Fatalf("%+v", a)
+	}
+}
+
+func TestSetupManualEmptyHost(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	in := "1\nme@x.example\nmanual\n\n"
+	err := runSetup(context.Background(), strings.NewReader(in), &bytes.Buffer{}, lister, &fakeStore{}, nil, p)
 	if err == nil {
 		t.Fatal("want error")
 	}

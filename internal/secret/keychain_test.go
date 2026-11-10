@@ -52,3 +52,13 @@ func TestKeychainNotFound(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestKeychainKeepsSpaces(t *testing.T) {
+	for in, want := range map[string]string{"  pa ss  \n": "  pa ss  ", "pw\r\n": "pw", "pw": "pw"} {
+		k := Keychain{Run: func(string, ...string) ([]byte, error) { return []byte(in), nil }}
+		got, err := k.Get("a@b")
+		if err != nil || got != want {
+			t.Fatalf("%q: got %q %v", in, got, err)
+		}
+	}
+}

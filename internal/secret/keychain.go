@@ -47,7 +47,8 @@ func (k Keychain) Get(email string) (string, error) {
 		}
 		return "", fmt.Errorf("keychain get: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	pw := strings.TrimSuffix(string(out), "\n") // security -w appends one newline
+	return strings.TrimSuffix(pw, "\r"), nil
 }
 
 func (k Keychain) Set(email string) error {

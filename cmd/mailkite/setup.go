@@ -64,19 +64,20 @@ func runSetup(ctx context.Context, in io.Reader, out io.Writer,
 	if err != nil {
 		return err
 	}
+	preset = strings.ToLower(preset)
 
 	var acc config.Account
 	if preset == "manual" {
 		acc.SMTPTLS = "starttls"
 		if ma.Kind != "pop" {
-			if acc.IMAPHost, err = ask("IMAP host: "); err != nil {
+			if acc.IMAPHost, err = askHost(ask, "IMAP host: "); err != nil {
 				return err
 			}
 			if acc.IMAPPort, err = askPort(ask, "IMAP port: "); err != nil {
 				return err
 			}
 		}
-		if acc.SMTPHost, err = ask("SMTP host: "); err != nil {
+		if acc.SMTPHost, err = askHost(ask, "SMTP host: "); err != nil {
 			return err
 		}
 		if acc.SMTPPort, err = askPort(ask, "SMTP port: "); err != nil {
@@ -111,7 +112,8 @@ func runSetup(ctx context.Context, in io.Reader, out io.Writer,
 			return err
 		}
 		if err := verify(ctx, acc, pw); err != nil {
-			return fmt.Errorf("login check failed: %w", err)
+			fmt.Fprintf(out, "login failed: %v. The new password was saved to the Keychain; run `mailkite setup` again to replace it, or remove it with: security delete-generic-password -s mailkite -a %s\n", err, email)
+			return fmt.Errorf("login failed: %w", err)
 		}
 		fmt.Fprintln(out, "IMAP login OK")
 	}
@@ -146,4 +148,15 @@ func askPort(ask func(string) (string, error), prompt string) (int, error) {
 		return 0, fmt.Errorf("invalid port %q", s)
 	}
 	return p, nil
+}
+
+func askHost(ask func(string) (string, error), prompt string) (string, error) {
+	h, err := ask(prompt)
+	if err != nil {
+		return "", err
+	}
+	if h == "" {
+		return "", errors.New("host must not be empty")
+	}
+	return h, nil
 }

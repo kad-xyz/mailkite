@@ -4,6 +4,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -65,6 +66,11 @@ func Load(path string) (*Config, error) {
 		if err := json.Unmarshal(b, c); err != nil {
 			return nil, err
 		}
+		for i, a := range c.Accounts {
+			if err := a.validate(); err != nil {
+				return nil, fmt.Errorf("config %s: account %d: %w", path, i+1, err)
+			}
+		}
 	}
 	if c.MarkLimit == 0 {
 		c.MarkLimit = DefaultMarkLimit
@@ -117,4 +123,33 @@ func (c *Config) ByMailUUID(uuid string) (Account, bool) {
 		}
 	}
 	return Account{}, false
+}
+
+func validPort(p int) bool { return p >= 1 && p <= 65535 }
+
+func (a Account) validate() error {
+	if a.Email == "" {
+		return errors.New("empty email")
+	}
+	switch a.Kind {
+	case "imap":
+		if a.IMAPHost == "" {
+			return fmt.Errorf("%s: empty IMAPHost", a.Email)
+		}
+		if !validPort(a.IMAPPort) {
+			return fmt.Errorf("%s: invalid IMAPPort %d", a.Email, a.IMAPPort)
+		}
+	case "pop":
+	default:
+		return fmt.Errorf("%s: Kind must be imap or pop, got %q", a.Email, a.Kind)
+	}
+	switch a.SMTPTLS {
+	case "", "tls", "starttls":
+	default:
+		return fmt.Errorf("%s: SMTPTLS must be tls or starttls, got %q", a.Email, a.SMTPTLS)
+	}
+	if a.SMTPHost != "" && !validPort(a.SMTPPort) {
+		return fmt.Errorf("%s: invalid SMTPPort %d", a.Email, a.SMTPPort)
+	}
+	return nil
 }
