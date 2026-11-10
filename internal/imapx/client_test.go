@@ -567,6 +567,9 @@ func TestDialWrongPassword(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected login error")
 	}
+	if strings.Contains(err.Error(), testUser) || strings.Contains(err.Error(), "@") {
+		t.Fatalf("login error must not name the address: %v", err)
+	}
 	if err := Verify(ctx(t), config.Account{Email: testUser, IMAPHost: host, IMAPPort: p, Kind: "pop"}, testPass); err == nil {
 		t.Fatal("pop must be refused")
 	}

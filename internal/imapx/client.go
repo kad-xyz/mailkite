@@ -92,7 +92,12 @@ func DialWith(ctx context.Context, a config.Account, password string, o DialOpti
 	end()
 	if err != nil {
 		conn.c.Close()
-		return nil, fmt.Errorf("imap: login %s: %w", a.Email, err)
+		// The address stays out of the error: it reaches tool replies and logs.
+		msg := err.Error()
+		if a.Email != "" {
+			msg = strings.ReplaceAll(msg, a.Email, "<account>")
+		}
+		return nil, fmt.Errorf("imap: login failed: %s", msg)
 	}
 	return conn, nil
 }
