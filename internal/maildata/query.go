@@ -40,7 +40,8 @@ type Summary struct {
 	Date             time.Time
 	From, FromName   string
 	Subject          string
-	Account, Mailbox string
+	Account, Mailbox string // account NAME (resolved) and mailbox name
+	AccountUUID      string // Mail account UUID
 	Read, Flagged    bool
 	Size             int64
 	Attachments      int
@@ -349,7 +350,7 @@ rowLoop:
 			}
 		}
 		mb := byID[mid]
-		sm.Account, sm.Mailbox = accountName(names, mb.AccountUUID), mb.Name
+		sm.Account, sm.Mailbox, sm.AccountUUID = accountName(names, mb.AccountUUID), mb.Name, mb.AccountUUID
 		if !fn(sm, mb) {
 			break
 		}
@@ -422,7 +423,7 @@ func (s *Store) Get(ctx context.Context, id int64) (Summary, Mailbox, error) {
 		return Summary{}, Mailbox{}, err
 	}
 	mb := ParseMailboxURL(mid, u.String)
-	sm.Account, sm.Mailbox = accountName(s.accountNames(), mb.AccountUUID), mb.Name
+	sm.Account, sm.Mailbox, sm.AccountUUID = accountName(s.accountNames(), mb.AccountUUID), mb.Name, mb.AccountUUID
 	return sm, mb, nil
 }
 

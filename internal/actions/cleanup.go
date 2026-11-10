@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -158,9 +157,6 @@ type candidate struct {
 	mb maildata.Mailbox
 }
 
-// senderMatcher turns "a@b.c" into an exact address match and "@b.c" or "b.c" into
-// a domain match that includes subdomains. needle is the Filter.From substring
-// that finds a superset of the matches in the index.
 // isAddress reports a full address (local@domain), not "@domain" or a fragment.
 func isAddress(s string) bool {
 	s = strings.TrimSpace(s)
@@ -168,6 +164,9 @@ func isAddress(s string) bool {
 	return ok && l != "" && d != "" && !strings.ContainsAny(s, " <>")
 }
 
+// senderMatcher turns "a@b.c" into an exact address match and "@b.c" or "b.c" into
+// a domain match that includes subdomains. needle is the Filter.From substring
+// that finds a superset of the matches in the index.
 func senderMatcher(spec string) (needle string, match func(addr string) bool) {
 	spec = strings.ToLower(strings.TrimSpace(spec))
 	if spec == "" {
@@ -205,17 +204,23 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 		match  func(string) bool
 	}
 	var specs []spec
-	senders := r.Senders
-	fromNeedle := strings.ToLower(r.Filter.From)
-	if isAddress(r.Filter.From) {
-		// A full address means exactly that sender, not a substring of others.
-		senders = append(slices.Clone(senders), r.Filter.From)
-		r.Filter.From, fromNeedle = "", ""
-	}
-	for _, s := range senders {
+	for _, s := range r.Senders {
 		if n, m := senderMatcher(s); m != nil {
 			specs = append(specs, spec{n, m})
 		}
+	}
+	// A full address in From means exactly that sender. With senders it is one
+	// more AND condition (a filter never widens the selection); alone it is the
+	// only sender spec.
+	fromNeedle := strings.ToLower(r.Filter.From)
+	fromExact := ""
+	if isAddress(r.Filter.From) {
+		fromExact = strings.ToLower(strings.TrimSpace(r.Filter.From))
+		if len(specs) == 0 {
+			n, m := senderMatcher(fromExact)
+			specs = append(specs, spec{n, m})
+		}
+		r.Filter.From, fromNeedle = "", ""
 	}
 	if len(specs) == 0 {
 		specs = []spec{{}}
@@ -241,6 +246,9 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 			}
 			for _, sm := range items {
 				if sp.match != nil && !sp.match(sm.From) {
+					continue
+				}
+				if fromExact != "" && !strings.EqualFold(strings.TrimSpace(sm.From), fromExact) {
 					continue
 				}
 				if sp.match != nil && fromNeedle != "" && !strings.Contains(strings.ToLower(sm.From), fromNeedle) &&

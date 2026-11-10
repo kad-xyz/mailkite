@@ -91,6 +91,13 @@ func TestFindDedupPerAccount(t *testing.T) {
 	if err != nil || len(items) != 2 {
 		t.Fatalf("same Message-ID in two accounts must both show: %+v %v", items, err)
 	}
+	uuids := map[string]bool{items[0].AccountUUID: true, items[1].AccountUUID: true}
+	if !uuids["A"] || !uuids["B"] {
+		t.Fatalf("AccountUUID %+v", items)
+	}
+	if got, _, err := s.Get(ctx, items[0].ID); err != nil || got.AccountUUID != items[0].AccountUUID || got.Account == got.AccountUUID {
+		t.Fatalf("get %+v %v", got, err)
+	}
 	g, err := s.Senders(ctx, Filter{}, 1)
 	if err != nil || len(g) != 1 || g[0].Count != 2 {
 		t.Fatalf("senders %+v %v", g, err)

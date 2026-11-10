@@ -42,7 +42,7 @@ WHERE m.deleted = 0 AND m.ROWID > ? ORDER BY m.ROWID ASC`
 			return err
 		}
 		mb := byID[mid]
-		sm.Account, sm.Mailbox = accountName(names, mb.AccountUUID), mb.Name
+		sm.Account, sm.Mailbox, sm.AccountUUID = accountName(names, mb.AccountUUID), mb.Name, mb.AccountUUID
 		if err := fn(sm, mb, splitList(to), splitList(att)); err != nil {
 			return err
 		}
