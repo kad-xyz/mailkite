@@ -9,8 +9,10 @@ import (
 	"runtime"
 	"runtime/debug"
 
+	"github.com/kad-xyz/mailkite/internal/config"
 	"github.com/kad-xyz/mailkite/internal/fts"
 	"github.com/kad-xyz/mailkite/internal/maildata"
+	"github.com/kad-xyz/mailkite/internal/secret"
 	"github.com/kad-xyz/mailkite/internal/server"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -52,6 +54,18 @@ func run(ctx context.Context, args []string) error {
 	case args[0] == "version":
 		fmt.Println("mailkite " + version)
 		return nil
+	case args[0] == "setup":
+		st, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		cfgPath, err := config.Path()
+		if err != nil {
+			return err
+		}
+		verify := func(context.Context, config.Account, string) error { return nil } // real IMAP check: Task 2
+		return runSetup(ctx, os.Stdin, os.Stdout, st.Accounts, secret.Keychain{}, verify, cfgPath)
 	case args[0] == "index":
 		st, err := openStore()
 		if err != nil {
@@ -73,7 +87,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("indexed %d docs\n", n)
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, "usage: mailkite [version|index]")
+	fmt.Fprintln(os.Stderr, "usage: mailkite [version|index|setup]")
 	os.Exit(2)
 	return nil
 }
