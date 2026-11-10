@@ -180,7 +180,7 @@ func pickMethod(m *message.Message, allowPrivate bool) UnsubLine {
 		}
 	}
 	for _, u := range urls {
-		if _, _, _, err := parseMailto(u); err == nil {
+		if _, _, err := parseMailto(u); err == nil {
 			return UnsubLine{Method: MethodMailto, URL: u}
 		}
 	}
@@ -203,28 +203,33 @@ func cleanLine(s string, max int) string {
 	return s
 }
 
+// mailtoBody is the whole body of every mailto unsubscribe: the body hfield of the
+// URI is never used, so nothing the user did not see is ever sent.
+const mailtoBody = defaultUnsub
+
 // parseMailto reads an RFC 6068 mailto URI. The recipient is exactly one address
-// from the URI path; the to, cc, bcc and all other hfields are ignored, so no
-// other recipient is ever added. subject and body default to "unsubscribe".
-func parseMailto(raw string) (to, subject, body string, err error) {
+// from the URI path; the to, cc, bcc, body and all other hfields are ignored, so
+// no other recipient or text is ever added. The subject is one line of at most
+// fragRunes runes (default "unsubscribe") and is shown in the dialog.
+func parseMailto(raw string) (to, subject string, err error) {
 	if len(raw) < 7 || !strings.EqualFold(raw[:7], "mailto:") {
-		return "", "", "", errors.New("not a mailto URI")
+		return "", "", errors.New("not a mailto URI")
 	}
 	path, query, _ := strings.Cut(raw[7:], "?")
 	var addrs []string
 	for _, a := range strings.Split(path, ",") {
 		d, err := url.PathUnescape(a)
 		if err != nil {
-			return "", "", "", errors.New("bad mailto address")
+			return "", "", errors.New("bad mailto address")
 		}
 		if d = strings.TrimSpace(d); d != "" {
 			addrs = append(addrs, d)
 		}
 	}
 	if len(addrs) != 1 || !smtpx.ValidAddress(addrs[0]) {
-		return "", "", "", errors.New("mailto needs exactly one plain address")
+		return "", "", errors.New("mailto needs exactly one plain address")
 	}
-	subject, body = defaultUnsub, defaultUnsub
+	subject = defaultUnsub
 	for _, kv := range strings.Split(query, "&") {
 		k, v, _ := strings.Cut(kv, "=")
 		k, err1 := url.PathUnescape(k)
@@ -232,21 +237,13 @@ func parseMailto(raw string) (to, subject, body string, err error) {
 		if err1 != nil || err2 != nil {
 			continue
 		}
-		switch strings.ToLower(k) {
-		case "subject":
-			if s := cleanLine(v, 200); s != "" {
+		if strings.EqualFold(k, "subject") {
+			if s := frag(v); s != "" {
 				subject = s
-			}
-		case "body":
-			if b := strings.TrimSpace(strings.ToValidUTF8(v, "")); b != "" {
-				if utf8.RuneCountInString(b) > 2000 {
-					b = string([]rune(b)[:2000])
-				}
-				body = b
 			}
 		}
 	}
-	return addrs[0], subject, body, nil
+	return addrs[0], subject, nil
 }
 
 // newestFrom finds the newest message (with a Message-ID, not erased by mailkite)
@@ -495,12 +492,12 @@ func (e *Engine) unsubSummary(x unsubExtra, count int, cleanup string) string {
 		if it.Method == MethodOneClick {
 			fmt.Fprintf(&b, "\n%s — запрос на %s", frag(it.Sender), frag(hostOf(it.URL)))
 		} else {
-			to, _, _, _ := parseMailto(it.URL)
+			to, subject, _ := parseMailto(it.URL)
 			from := ""
 			if acc, ok := e.Cfg.ByMailUUID(it.Account); ok {
 				from = acc.Email
 			}
-			fmt.Fprintf(&b, "\n%s — письмо на %s с адреса %s", frag(it.Sender), frag(to), frag(from))
+			fmt.Fprintf(&b, "\n%s — письмо на %s с адреса %s, тема: %s", frag(it.Sender), frag(to), frag(from), subject)
 		}
 	}
 	if len(manual) > 0 {
@@ -604,7 +601,7 @@ func (e *Engine) postOneClick(ctx context.Context, c *http.Client, u string) err
 
 // sendMailto sends the unsubscribe email from the account that got the message.
 func (e *Engine) sendMailto(ctx context.Context, it unsubItem) error {
-	to, subject, body, err := parseMailto(it.URL)
+	to, subject, err := parseMailto(it.URL)
 	if err != nil {
 		return err
 	}
@@ -623,7 +620,7 @@ func (e *Engine) sendMailto(ctx context.Context, it unsubItem) error {
 	if send == nil {
 		send = smtpx.Send
 	}
-	if err := send(ctx, acc, pw, acc.Email, []string{to}, smtpx.Build(acc.Email, to, subject, body)); err != nil {
+	if err := send(ctx, acc, pw, acc.Email, []string{to}, smtpx.Build(acc.Email, to, subject, mailtoBody)); err != nil {
 		return errors.New(cleanLine(err.Error(), 100))
 	}
 	return nil

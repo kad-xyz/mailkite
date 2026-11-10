@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
@@ -308,7 +309,7 @@ func TestMailtoSends(t *testing.T) {
 	v.e.SendMail = func(ctx context.Context, a config.Account, pw, from string, to []string, raw []byte) error {
 		return smtpx.SendWith(ctx, a, pw, from, to, raw, smtpx.Options{Insecure: true})
 	}
-	h := "Delivered-To: A@iCloud.example\r\nList-Id: <news.shop.example>\r\nList-Unsubscribe: <mailto:unsub@shop.example?subject=Remove%20me&cc=evil@x.example&bcc=evil2@x.example&to=more@x.example>\r\nPrecedence: bulk\r\n"
+	h := "Delivered-To: A@iCloud.example\r\nList-Id: <news.shop.example>\r\nList-Unsubscribe: <mailto:unsub@shop.example?subject=Remove%20me&body=I%20agree%20to%20pay%20100%24&cc=evil@x.example&bcc=evil2@x.example&to=more@x.example>\r\nPrecedence: bulk\r\n"
 	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "x", msgOpt{headers: &h})
 
 	p, err := v.e.BuildUnsubscribe(ctxT(t), []string{"news@shop.example"}, "")
@@ -325,6 +326,9 @@ func TestMailtoSends(t *testing.T) {
 	if len(rep.Unsubscribe) != 1 || rep.Unsubscribe[0] != "news@shop.example | done" {
 		t.Fatalf("report %+v", rep)
 	}
+	if !strings.Contains(v.confirm.body, "письмо на unsub@shop.example с адреса a@icloud.example, тема: Remove me") {
+		t.Fatalf("dialog must show the subject: %q", v.confirm.body)
+	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if rec.from != "a@icloud.example" || rec.user != "a@icloud.example" || len(rec.to) != 1 || rec.to[0] != "unsub@shop.example" {
@@ -334,26 +338,33 @@ func TestMailtoSends(t *testing.T) {
 		strings.Contains(rec.data, "evil") || strings.Contains(rec.data, "more@") {
 		t.Fatalf("data %q", rec.data)
 	}
+	if _, body, _ := strings.Cut(rec.data, "\r\n\r\n"); body != "unsubscribe\r\n" {
+		t.Fatalf("body must be the fixed text, got %q", body)
+	}
 }
 
 func TestParseMailto(t *testing.T) {
-	to, subj, body, err := parseMailto("mailto:u%40x@shop.example")
+	to, subj, err := parseMailto("mailto:u%40x@shop.example")
 	if err == nil {
 		t.Fatalf("odd local part accepted: %q", to)
 	}
-	to, subj, body, err = parseMailto("mailto:stop@shop.example")
-	if err != nil || to != "stop@shop.example" || subj != "unsubscribe" || body != "unsubscribe" {
-		t.Fatalf("%q %q %q %v", to, subj, body, err)
+	to, subj, err = parseMailto("mailto:stop@shop.example")
+	if err != nil || to != "stop@shop.example" || subj != "unsubscribe" || mailtoBody != "unsubscribe" {
+		t.Fatalf("%q %q %v", to, subj, err)
 	}
-	if _, _, _, err := parseMailto("mailto:a@x.example,b@y.example"); err == nil {
+	if _, _, err := parseMailto("mailto:a@x.example,b@y.example"); err == nil {
 		t.Fatal("several recipients must be refused")
 	}
-	if _, _, _, err := parseMailto("mailto:?to=a@x.example"); err == nil {
+	if _, _, err := parseMailto("mailto:?to=a@x.example"); err == nil {
 		t.Fatal("recipient only from hfields must be refused")
 	}
-	_, subj, body, err = parseMailto("mailto:s@shop.example?subject=Hi%0D%0ABcc:%20e@x.example&body=line1%0D%0Aline2")
-	if err != nil || strings.ContainsAny(subj, "\r\n") || body != "line1\r\nline2" {
-		t.Fatalf("%q %q %v", subj, body, err)
+	_, subj, err = parseMailto("mailto:s@shop.example?subject=Hi%0D%0ABcc:%20e@x.example&body=line1%0D%0Aline2")
+	if err != nil || strings.ContainsAny(subj, "\r\n") || subj != "Hi Bcc: e@x.example" {
+		t.Fatalf("%q %v", subj, err)
+	}
+	_, subj, err = parseMailto("mailto:s@shop.example?subject=" + strings.Repeat("%D1%8F", 200))
+	if err != nil || utf8.RuneCountInString(subj) > 80 {
+		t.Fatalf("subject not clipped to 80: %d %v", utf8.RuneCountInString(subj), err)
 	}
 }
 
