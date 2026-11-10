@@ -374,3 +374,10 @@ func (ix *Index) Search(ctx context.Context, query string, limit int) ([]int64, 
 	}
 	return out, rows.Err()
 }
+
+// Count returns the number of indexed documents.
+func (ix *Index) Count(ctx context.Context) (int, error) {
+	var n int
+	err := ix.db.QueryRowContext(ctx, "SELECT count(*) FROM docs").Scan(&n)
+	return n, err
+}
