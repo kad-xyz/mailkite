@@ -947,22 +947,31 @@ func (e *Engine) runPOP(ctx context.Context, uuid string, ts []safety.Target, x 
 	if len(ids) == 0 {
 		return r
 	}
-	deleted, err := e.POP.Delete(ctx, uuid, ids)
-	// Count only requested IDs Mail reported, each once.
+	res, err := e.POP.Delete(ctx, uuid, ids)
+	// Count only requested IDs Mail reported, each once; a copy left anywhere in
+	// the account is a failure, never "done".
 	want := map[string]string{}
 	for _, id := range ids {
 		want[normID(id)] = id
 	}
-	var gone []string
-	for _, d := range deleted {
-		if id, ok := want[normID(d)]; ok {
-			gone = append(gone, id)
-			delete(want, normID(d))
+	pick := func(l []string) []string {
+		var out []string
+		for _, d := range l {
+			if id, ok := want[normID(d)]; ok {
+				out = append(out, id)
+				delete(want, normID(d))
+			}
 		}
+		return out
 	}
+	left := pick(res.Left)
+	gone := pick(res.Deleted)
 	r.done += len(gone)
 	e.hide(uuid, gone, now, &r)
-	if rest := len(ids) - len(gone); rest > 0 {
+	if len(left) > 0 {
+		r.fail(len(left), "pop_left", fmt.Sprintf("%d still in Mail after delete", len(left)))
+	}
+	if rest := len(want); rest > 0 {
 		if err != nil {
 			r.fail(rest, "pop_failed", "Mail: "+err.Error())
 		} else {

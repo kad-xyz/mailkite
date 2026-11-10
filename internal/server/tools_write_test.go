@@ -114,7 +114,9 @@ func (f fakeSecrets) Set(string) error { return nil }
 
 type fakePOP struct{}
 
-func (fakePOP) Delete(context.Context, string, []string) ([]string, error) { return nil, nil }
+func (fakePOP) Delete(context.Context, string, []string) (actions.POPResult, error) {
+	return actions.POPResult{}, nil
+}
 
 type wenv struct {
 	*env

@@ -12,47 +12,98 @@ import (
 // folders on the server, so the local copy in Mail is the message.
 type POPDeleter interface {
 	// Delete removes the messages with these Message-IDs from every mailbox of the
-	// Mail account and then from its Deleted Messages. It returns the requested
-	// Message-IDs (as given) that Mail found and deleted, each once.
-	Delete(ctx context.Context, mailUUID string, messageIDs []string) (deleted []string, err error)
+	// Mail account and then from its trash. Deleted holds the requested
+	// Message-IDs (as given) of which, after that, no copy is left anywhere in the
+	// account; Left those Mail found but still has a copy of. IDs in neither were
+	// not found.
+	Delete(ctx context.Context, mailUUID string, messageIDs []string) (POPResult, error)
+}
+
+// POPResult is the verified outcome of POPDeleter.Delete.
+type POPResult struct {
+	Deleted, Left []string
 }
 
 const osascriptBin = "/usr/bin/osascript"
 
 // popScript is fixed: the account UUID and Message-IDs arrive only as argv items
 // (1 = account UUID, 2.. = Message-IDs without angle brackets, as Mail reports them).
-// It prints the Message-IDs it found and deleted, one per line.
+// For each ID it deletes every copy in every mailbox of the account (nested ones
+// too), then every copy in the account's trash ("Deleted Messages" and the
+// account's mailbox of Mail's trash mailbox), and then counts the copies left in
+// all of them. It prints "gone<TAB>id" only when Mail found the message and no
+// copy is left, and "left<TAB>id" when one is; a failed count counts as a copy.
 var popScript = []string{
 	"on run argv",
 	"set accId to item 1 of argv",
-	"set done to {}",
+	"set out to {}",
 	"with timeout of 1800 seconds",
 	`tell application "Mail"`,
 	"set acc to account id accId",
+	"set trashes to {}",
+	"try",
+	`set end of trashes to mailbox "Deleted Messages" of acc`,
+	"end try",
+	"try",
+	"repeat with tb in (every mailbox of trash mailbox)",
+	"try",
+	"if (id of account of tb) is accId then set end of trashes to contents of tb",
+	"end try",
+	"end repeat",
+	"end try",
+	"set boxes to my boxesOf(acc)",
 	"repeat with i from 2 to count of argv",
 	"set mid to item i of argv",
 	"set got to false",
-	"repeat with mb in (every mailbox of acc)",
-	`if name of mb is not "Deleted Messages" then`,
+	"repeat with mb in (boxes & trashes)",
+	"try",
 	"set hits to (every message of mb whose message id is mid)",
+	"if (count of hits) > 0 then set got to true",
 	"repeat with m in hits",
 	"delete m",
-	"set got to true",
 	"end repeat",
-	"end if",
-	"end repeat",
-	"if got then set end of done to mid",
-	"try",
-	`delete (every message of mailbox "Deleted Messages" of acc whose message id is mid)`,
 	"end try",
+	"end repeat",
+	"repeat with tb in trashes",
+	"try",
+	"set hits to (every message of tb whose message id is mid)",
+	"if (count of hits) > 0 then set got to true",
+	"repeat with m in hits",
+	"delete m",
+	"end repeat",
+	"end try",
+	"end repeat",
+	"set remaining to 0",
+	"repeat with mb in (boxes & trashes)",
+	"try",
+	"set remaining to remaining + (count of (every message of mb whose message id is mid))",
+	"on error",
+	"set remaining to remaining + 1",
+	"end try",
+	"end repeat",
+	"if got and remaining is 0 then",
+	`set end of out to "gone" & tab & mid`,
+	"else if got then",
+	`set end of out to "left" & tab & mid`,
+	"end if",
 	"end repeat",
 	"end tell",
 	"end timeout",
 	"set AppleScript's text item delimiters to linefeed",
-	"set out to done as text",
+	"set res to out as text",
 	`set AppleScript's text item delimiters to ""`,
-	"return out",
+	"return res",
 	"end run",
+	"on boxesOf(c)",
+	"set res to {}",
+	`tell application "Mail"`,
+	"repeat with mb in (every mailbox of c)",
+	"set end of res to contents of mb",
+	"set res to res & (my boxesOf(contents of mb))",
+	"end repeat",
+	"end tell",
+	"return res",
+	"end boxesOf",
 }
 
 // POPScript returns the AppleScript source AppleScriptPOP runs (for checks).
@@ -64,10 +115,11 @@ type AppleScriptPOP struct {
 	Run func(ctx context.Context, args ...string) ([]byte, error)
 }
 
-// Delete implements POPDeleter.
-func (a AppleScriptPOP) Delete(ctx context.Context, mailUUID string, messageIDs []string) ([]string, error) {
+// Delete implements POPDeleter. Only "gone" and "left" lines for requested IDs
+// count, each ID once; "left" wins over "gone".
+func (a AppleScriptPOP) Delete(ctx context.Context, mailUUID string, messageIDs []string) (POPResult, error) {
 	if strings.TrimSpace(mailUUID) == "" {
-		return nil, errors.New("pop delete: empty account")
+		return POPResult{}, errors.New("pop delete: empty account")
 	}
 	orig := map[string]string{} // normalized -> as given (first one)
 	var ids []string
@@ -82,7 +134,7 @@ func (a AppleScriptPOP) Delete(ctx context.Context, mailUUID string, messageIDs 
 		}
 	}
 	if len(ids) == 0 {
-		return nil, nil
+		return POPResult{}, nil
 	}
 	args := make([]string, 0, 2*len(popScript)+2+len(ids))
 	for _, l := range popScript {
@@ -98,22 +150,32 @@ func (a AppleScriptPOP) Delete(ctx context.Context, mailUUID string, messageIDs 
 	}
 	out, err := run(ctx, args...)
 	if err != nil {
-		return nil, fmt.Errorf("pop delete: osascript: %w", err)
+		return POPResult{}, fmt.Errorf("pop delete: osascript: %w", err)
 	}
-	// Only requested IDs count, each once, in request order.
-	got := map[string]bool{}
+	gone, left := map[string]bool{}, map[string]bool{}
 	for _, l := range strings.Split(string(out), "\n") {
-		if n := normID(strings.TrimSuffix(l, "\r")); n != "" {
-			got[n] = true
+		status, id, ok := strings.Cut(strings.TrimSuffix(l, "\r"), "\t")
+		if !ok {
+			continue
+		}
+		switch n := normID(id); {
+		case n == "":
+		case status == "gone":
+			gone[n] = true
+		case status == "left":
+			left[n] = true
 		}
 	}
-	var deleted []string
+	var res POPResult
 	for _, n := range ids {
-		if got[n] {
-			deleted = append(deleted, orig[n])
+		switch {
+		case left[n]:
+			res.Left = append(res.Left, orig[n])
+		case gone[n]:
+			res.Deleted = append(res.Deleted, orig[n])
 		}
 	}
-	return deleted, nil
+	return res, nil
 }
 
 // normID trims spaces and angle brackets from a Message-ID.

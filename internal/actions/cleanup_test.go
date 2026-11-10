@@ -205,17 +205,17 @@ type fakePOP struct {
 	uuid    string
 	archive string // archive dir, to count .eml at call time
 	emlSeen int
-	reply   func(ids []string) []string // nil: all deleted
+	reply   func(ids []string) POPResult // nil: all deleted
 }
 
-func (p *fakePOP) Delete(_ context.Context, uuid string, ids []string) ([]string, error) {
+func (p *fakePOP) Delete(_ context.Context, uuid string, ids []string) (POPResult, error) {
 	p.uuid = uuid
 	p.calls = append(p.calls, slices.Clone(ids))
 	p.emlSeen = countEml(p.archive)
 	if p.reply != nil {
 		return p.reply(ids), nil
 	}
-	return slices.Clone(ids), nil
+	return POPResult{Deleted: slices.Clone(ids)}, nil
 }
 
 type env struct {
@@ -832,7 +832,7 @@ func TestPOPCountsOnlyReportedIDs(t *testing.T) {
 	_, id1 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
 	_, id2 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
 	// Mail found two copies of id1 and none of id2; it also names an id never asked for.
-	v.pop.reply = func([]string) []string { return []string{norm(id1), id1, "stranger@x"} }
+	v.pop.reply = func([]string) POPResult { return POPResult{Deleted: []string{norm(id1), id1, "stranger@x"}} }
 	rep, err := v.e.Execute(ctxT(t), eraseShop(v).PlanID)
 	if err != nil || rep.Done != 1 || rep.NotFound != 1 || rep.Failed != 0 {
 		t.Fatalf("rep %+v err %v", rep, err)
@@ -843,6 +843,25 @@ func TestPOPCountsOnlyReportedIDs(t *testing.T) {
 	}
 	if _, ok := h[safety.HiddenKey{Account: uuidP, MessageID: id2}]; ok {
 		t.Fatal("id2 was not deleted")
+	}
+}
+
+func TestPOPLeftoversFail(t *testing.T) {
+	v := newEnv(t)
+	_, id1 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
+	_, id2 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
+	// Mail deleted id1, but a copy of id2 is still somewhere in the account.
+	v.pop.reply = func([]string) POPResult { return POPResult{Deleted: []string{id1}, Left: []string{id2}} }
+	rep, err := v.e.Execute(ctxT(t), eraseShop(v).PlanID)
+	if err != nil || rep.Done != 1 || rep.Failed != 1 || rep.NotFound != 0 {
+		t.Fatalf("rep %+v err %v", rep, err)
+	}
+	if !strings.Contains(strings.Join(rep.PerAccount, "\n"), "still in Mail") {
+		t.Fatalf("per account %q", rep.PerAccount)
+	}
+	p := eraseShop(v)
+	if p.Count != 1 {
+		t.Fatalf("the leftover must stay visible: %+v", p)
 	}
 }
 
