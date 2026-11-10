@@ -19,7 +19,7 @@ func load(t *testing.T, name string) []byte {
 
 func TestReadEmlx(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "1.emlx")
-	os.WriteFile(p, []byte("14\nHello: x\r\n\r\nhi<?xml version=\"1.0\"?><plist/>"), 0o644)
+	write(t, p, "14\nHello: x\r\n\r\nhi<?xml version=\"1.0\"?><plist/>")
 	raw, err := ReadEmlx(p)
 	if err != nil {
 		t.Fatal(err)
@@ -31,17 +31,17 @@ func TestReadEmlx(t *testing.T) {
 
 func TestReadEmlxTrailingSpacesAndShort(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "1.emlx")
-	os.WriteFile(p, []byte("5  \nabcdefg"), 0o644)
+	write(t, p, "5  \nabcdefg")
 	raw, _ := ReadEmlx(p)
 	if string(raw) != "abcde" {
 		t.Fatalf("got %q", raw)
 	}
-	os.WriteFile(p, []byte("50\nabc"), 0o644)
+	write(t, p, "50\nabc")
 	raw, err := ReadEmlx(p)
 	if err != nil || string(raw) != "abc" {
 		t.Fatalf("got %q %v", raw, err)
 	}
-	os.WriteFile(p, []byte("garbage\nabc"), 0o644)
+	write(t, p, "garbage\nabc")
 	if _, err := ReadEmlx(p); err == nil {
 		t.Fatal("expected error")
 	}
@@ -155,8 +155,8 @@ func TestHTMLToText(t *testing.T) {
 <h1>Title</h1><p>One</p><p>Two<br>three</p><table><tr><td>a</td><td>b</td></tr></table>
 <ul><li>x</li><li>y</li></ul><img alt="logo" src="a.png"><a href="https://e.com">link</a>   many    spaces</body></html>`
 	got := HTMLToText(in)
-	for _, bad := range []string{"H1", "H2", "H3", "var a", "logo", "x\n\n"} {
-		if strings.Contains(got, bad) && bad != "x\n\n" {
+	for _, bad := range []string{"H1", "H2", "H3", "var a", "logo"} {
+		if strings.Contains(got, bad) {
 			t.Fatalf("contains %q: %q", bad, got)
 		}
 	}
@@ -167,5 +167,19 @@ func TestHTMLToText(t *testing.T) {
 	}
 	if strings.Contains(got, "\n\n\n") {
 		t.Fatalf("3 newlines: %q", got)
+	}
+}
+
+func write(t *testing.T, p, s string) {
+	t.Helper()
+	if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTMLToTextLayoutTricks(t *testing.T) {
+	got := HTMLToText(`<div style="font-size:0"><div style="font-size:14px">Важный текст</div></div><span style="font-size:0;opacity:0">preheader</span>`)
+	if !strings.Contains(got, "Важный текст") || strings.Contains(got, "preheader") {
+		t.Fatalf("%q", got)
 	}
 }

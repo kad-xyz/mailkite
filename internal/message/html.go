@@ -8,9 +8,22 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
-var hiddenStyleRe = regexp.MustCompile(`(?i)(display\s*:\s*none|visibility\s*:\s*hidden|(max-height|font-size)\s*:\s*0(px|pt|em|rem|%)?\s*(;|!|$)|opacity\s*:\s*0(\.0+)?\s*(;|!|$))`)
+var (
+	hardHiddenRe = regexp.MustCompile(`(?i)(display\s*:\s*none|visibility\s*:\s*hidden)`)
+	// Layout tricks: only treated as hidden on elements without element children.
+	softHiddenRe = regexp.MustCompile(`(?i)((max-height|font-size)\s*:\s*0(px|pt|em|rem|%)?\s*(;|!|$)|opacity\s*:\s*0(\.0+)?\s*(;|!|$))`)
+)
 
 var htmlSpaceRe = regexp.MustCompile(`[ \t\r\n\f]+`)
+
+func hasElementChild(n *html.Node) bool {
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode {
+			return true
+		}
+	}
+	return false
+}
 
 func isHidden(n *html.Node) bool {
 	for _, a := range n.Attr {
@@ -18,7 +31,10 @@ func isHidden(n *html.Node) bool {
 		case "hidden":
 			return true
 		case "style":
-			if hiddenStyleRe.MatchString(a.Val) {
+			if hardHiddenRe.MatchString(a.Val) {
+				return true
+			}
+			if softHiddenRe.MatchString(a.Val) && !hasElementChild(n) {
 				return true
 			}
 		}

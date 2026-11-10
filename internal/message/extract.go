@@ -28,15 +28,16 @@ const (
 )
 
 var (
-	keywordRe   = regexp.MustCompile(`(?i)(код|code|пароль|password|otp|pin|verification)`)
+	keywordRe   = regexp.MustCompile(`(?i)(код|code|пароль|passcode|password|otp|pin|verification)`)
 	tokenRe     = regexp.MustCompile(`[A-Za-z0-9]+`)
 	urlSpanRe   = regexp.MustCompile(`(?i)(https?://|www\.)\S+|\S+@\S+\.\S+`)
 	phoneSpanRe = regexp.MustCompile(`\+?\d[ \d().-]{8,}\d`)
+	angleRe     = regexp.MustCompile(`<([^<>]*)>`)
 	textURLRe   = regexp.MustCompile(`https?://[^\s<>"'\]]+`)
 
 	unsubRe   = regexp.MustCompile(`(?i)unsubscribe|отпис|optout|opt-out`)
 	confirmRe = regexp.MustCompile(`(?i)confirm|verify|подтверд|activate|активир`)
-	loginRe   = regexp.MustCompile(`(?i)login|sign in|войти|вход`)
+	loginRe   = regexp.MustCompile(`(?i)login|sign in|(?:^|[^\p{L}])(?:войти|вход)(?:[^\p{L}]|$)`)
 	resetRe   = regexp.MustCompile(`(?i)reset|сброс|восстанов`)
 )
 
@@ -77,6 +78,11 @@ func keywordBoundaryOK(text string, s, e int) bool {
 	}
 	kw := text[s:e]
 	ascii := kw[0] < utf8.RuneSelf
+	if ascii && e < len(text) {
+		if text[e] == 's' || text[e] == 'S' {
+			e++
+		}
+	}
 	if ascii && e < len(text) {
 		if r, _ := utf8.DecodeRuneInString(text[e:]); unicode.IsLetter(r) {
 			return false
@@ -255,8 +261,8 @@ func Extract(m *Message, htmlBody string) Extracted {
 	for _, u := range textURLRe.FindAllString(m.Text, -1) {
 		cands = append(cands, Link{URL: strings.TrimRight(u, ".,;:!?)")})
 	}
-	for _, part := range strings.Split(m.ListUnsubscribe, ",") {
-		part = strings.Trim(strings.TrimSpace(part), "<>")
+	for _, g := range angleRe.FindAllStringSubmatch(m.ListUnsubscribe, -1) {
+		part := strings.TrimSpace(g[1])
 		if strings.HasPrefix(strings.ToLower(part), "http") {
 			cands = append(cands, Link{Text: "List-Unsubscribe", URL: part})
 		}

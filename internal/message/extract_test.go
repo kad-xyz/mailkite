@@ -75,3 +75,37 @@ func TestExtractLinksLimit(t *testing.T) {
 		t.Fatalf("%d %+v", len(got), got[0])
 	}
 }
+
+func TestExtractCodesFromParsedFixture(t *testing.T) {
+	m, err := Parse(load(t, "code.eml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Extract(m, "").Codes; !reflect.DeepEqual(got, []string{"482913"}) {
+		t.Fatalf("%v", got)
+	}
+}
+
+func TestExtractCodeKeywordForms(t *testing.T) {
+	for _, s := range []string{"Your codes: 123456", "passcode 123456"} {
+		if got := codes(s); !reflect.DeepEqual(got, []string{"123456"}) {
+			t.Fatalf("%q: %v", s, got)
+		}
+	}
+}
+
+func TestExtractLoginWordBoundary(t *testing.T) {
+	m := &Message{}
+	got := Extract(m, `<a href="https://example.com/mail">Входящие</a><a href="https://example.com/x">Вход</a>`).Links
+	if len(got) != 2 || got[0].Kind != "login" || got[0].Text != "Вход" || got[1].Kind != "other" {
+		t.Fatalf("%+v", got)
+	}
+}
+
+func TestListUnsubscribeCommaInURL(t *testing.T) {
+	m := &Message{ListUnsubscribe: "<mailto:u@example.com>, <https://example.com/u?a=1,2>"}
+	got := Extract(m, "").Links
+	if len(got) != 1 || got[0].URL != "https://example.com/u?a=1,2" {
+		t.Fatalf("%+v", got)
+	}
+}
