@@ -297,6 +297,61 @@ func (c *Conn) Locate(ctx context.Context, mailbox, messageID string, uidHint ui
 	return hits[0], true, nil
 }
 
+// LocateItem is one message for LocateMany: its Message-ID and the UID Mail
+// remembers for it (0 when unknown).
+type LocateItem struct {
+	MessageID string
+	UIDHint   uint32
+}
+
+// LocateMany finds many messages in one mailbox: one SELECT, one ENVELOPE FETCH
+// over all hints, and a Message-ID SEARCH only for items whose hint does not match.
+// The result maps each found item's MessageID (exactly as given) to its UID;
+// items not on the server are absent. Like Locate, it records UIDVALIDITY.
+func (c *Conn) LocateMany(ctx context.Context, mailbox string, items []LocateItem) (map[string]uint32, error) {
+	out := map[string]uint32{}
+	if len(items) == 0 {
+		return out, nil
+	}
+	for _, it := range items {
+		if normID(it.MessageID) == "" {
+			return nil, errors.New("imap: empty Message-ID")
+		}
+	}
+	defer c.begin(ctx)()
+	if err := c.selFresh(mailbox); err != nil {
+		return nil, err
+	}
+	var hints []uint32
+	for _, it := range items {
+		if it.UIDHint != 0 && !slices.Contains(hints, it.UIDHint) {
+			hints = append(hints, it.UIDHint)
+		}
+	}
+	slices.Sort(hints)
+	ids, err := c.envelopeIDs(hints)
+	if err != nil {
+		return nil, err
+	}
+	for _, it := range items {
+		id := normID(it.MessageID)
+		if it.UIDHint != 0 {
+			if got, ok := ids[it.UIDHint]; ok && got == id {
+				out[it.MessageID] = it.UIDHint
+				continue
+			}
+		}
+		hits, err := c.searchID(id)
+		if err != nil {
+			return nil, err
+		}
+		if len(hits) > 0 {
+			out[it.MessageID] = hits[0]
+		}
+	}
+	return out, nil
+}
+
 // FetchRaw returns the full message with BODY.PEEK[] (does not set \Seen).
 func (c *Conn) FetchRaw(ctx context.Context, mailbox string, uid uint32) ([]byte, error) {
 	defer c.begin(ctx)()

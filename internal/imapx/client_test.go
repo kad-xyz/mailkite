@@ -740,3 +740,48 @@ func TestEraseRefusesChangedUIDValidity(t *testing.T) {
 		t.Fatal("message erased despite UIDVALIDITY change")
 	}
 }
+
+func TestLocateMany(t *testing.T) {
+	ts := startServer(t, testOptions{})
+	uids := ts.seed(t, "INBOX", msg("a1@example.com", "A"), msg("b2@example.com", "B"), msg("c3@example.com", "C"))
+	ts.seed(t, "INBOX", msg("xd4@example.com.ru", "X"))
+	c := ts.dial(t)
+
+	ts.resetCounts()
+	got, err := c.LocateMany(ctx(t), "INBOX", []LocateItem{
+		{MessageID: "<a1@example.com>", UIDHint: uids[0]}, // right hint
+		{MessageID: "b2@example.com", UIDHint: uids[2]},   // wrong hint -> search
+		{MessageID: "<c3@example.com>", UIDHint: uids[2]}, // right hint
+		{MessageID: "<missing@example.com>", UIDHint: 999},
+		{MessageID: "<d4@example.com>"}, // substring of another id: not a match
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]uint32{"<a1@example.com>": uids[0], "b2@example.com": uids[1], "<c3@example.com>": uids[2]}
+	if len(got) != len(want) {
+		t.Fatalf("got %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("%s: got %d want %d (%v)", k, got[k], v, got)
+		}
+	}
+	ts.mu.Lock()
+	fetches := ts.fetches
+	ts.mu.Unlock()
+	searches, _ := ts.counts()
+	// One ENVELOPE FETCH over all hints; SEARCH (each with its own confirming fetch) only for the 3 misses.
+	if searches < 3 || searches > 6 {
+		t.Fatalf("searches %d", searches)
+	}
+	if fetches > 1+3 {
+		t.Fatalf("fetches %d: hints must be fetched in one command", fetches)
+	}
+	if _, err := c.LocateMany(ctx(t), "INBOX", []LocateItem{{MessageID: " "}}); err == nil {
+		t.Fatal("empty Message-ID must fail")
+	}
+	if got, err := c.LocateMany(ctx(t), "INBOX", nil); err != nil || len(got) != 0 {
+		t.Fatalf("empty: %v %v", got, err)
+	}
+}

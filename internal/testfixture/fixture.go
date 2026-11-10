@@ -49,6 +49,7 @@ type FixtureMsg struct {
 	Attachments                                    []string
 	Raw                                            []byte
 	Partial                                        bool
+	RemoteID                                       uint32 // messages.remote_id: the IMAP UID
 	// External holds attachment files Mail stores outside a .partial.emlx,
 	// under Data/.../Attachments/<rowid>/<Part>/<Name>.
 	External []ExternalAttachment
@@ -225,7 +226,7 @@ func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
 	res, err = tx.Exec(`INSERT INTO messages(message_id, global_message_id, remote_id, sender, subject_prefix, subject, summary,
 		date_sent, date_received, mailbox, flags, read, flagged, deleted, size, conversation_id, list_id_hash, unsubscribe_type)
 		VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,0,?,?)`,
-		gid, gid, 0, sender, "", subj, sum, ts, ts, mbox, b2i(m.Read), b2i(m.Flagged), b2i(m.Deleted), len(m.Raw), listHash, m.UnsubType)
+		gid, gid, m.RemoteID, sender, "", subj, sum, ts, ts, mbox, b2i(m.Read), b2i(m.Flagged), b2i(m.Deleted), len(m.Raw), listHash, m.UnsubType)
 	must(err)
 	rowid, _ = res.LastInsertId()
 	_, err = tx.Exec("UPDATE message_global_data SET message_id=? WHERE ROWID=?", rowid, gid)

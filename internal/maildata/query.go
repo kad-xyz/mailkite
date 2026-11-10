@@ -472,3 +472,20 @@ func (s *Store) Senders(ctx context.Context, f Filter, minCount int) ([]SenderGr
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
 	return out, nil
 }
+
+// RemoteID returns messages.remote_id of a message: its IMAP UID in its mailbox
+// (0 when Mail does not know it). It is only a hint; the server is the authority.
+func (s *Store) RemoteID(ctx context.Context, id int64) (uint32, error) {
+	var uid sql.NullInt64
+	err := s.db.QueryRowContext(ctx, "SELECT remote_id FROM messages WHERE ROWID = ?", id).Scan(&uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !uid.Valid || uid.Int64 <= 0 || uid.Int64 > 0xFFFFFFFF {
+		return 0, nil
+	}
+	return uint32(uid.Int64), nil
+}

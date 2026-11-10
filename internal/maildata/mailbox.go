@@ -78,6 +78,16 @@ func ParseMailboxURL(id int64, rawURL string) Mailbox {
 	return mb
 }
 
+// NameRole returns the role a mailbox name such as "[Gmail]/Trash" implies, by its
+// last path segment.
+func NameRole(name string) Role {
+	segs := strings.Split(strings.Trim(name, "/"), "/")
+	if r, ok := roleByName[strings.ToLower(segs[len(segs)-1])]; ok {
+		return r
+	}
+	return RoleOther
+}
+
 // Dir returns the mailbox directory under mailRoot (version V10 layout).
 func (m Mailbox) Dir(mailRoot string) string {
 	return m.dirIn(filepath.Join(mailRoot, "V10"))
