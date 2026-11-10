@@ -110,9 +110,11 @@ func metaInt(ctx context.Context, tx *sql.Tx, key string) (int64, error) {
 	return 0, nil
 }
 
-// bodyOf returns the parsed text of a message and whether it came from a complete .emlx.
+// bodyOf returns the parsed text of a message and whether an .emlx (full or partial) was
+// parsed. A .partial.emlx never becomes a full one (Mail keeps attachments separately), so
+// its text counts as final; only messages without a readable emlx are retried.
 func bodyOf(st *maildata.Store, id int64, mb maildata.Mailbox) (text string, parts []string, full bool) {
-	p, partial, ok := st.EmlxPath(id, mb)
+	p, _, ok := st.EmlxPath(id, mb)
 	if !ok {
 		return "", nil, false
 	}
@@ -133,7 +135,7 @@ func bodyOf(st *maildata.Store, id int64, mb maildata.Mailbox) (text string, par
 			parts = append(parts, part.Name)
 		}
 	}
-	return text, parts, !partial
+	return text, parts, true
 }
 
 // Sync indexes messages newer than meta.last_rowid (committing every chunkSize messages),

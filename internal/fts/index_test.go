@@ -183,7 +183,7 @@ func TestSearchFields(t *testing.T) {
 	}
 }
 
-func TestPartialEmlxIndexedAndRetried(t *testing.T) {
+func TestPartialEmlxIndexedNotPending(t *testing.T) {
 	f, st, ix := setup(t)
 	raw := []byte("From: a@x.com\r\nSubject: p\r\nMIME-Version: 1.0\r\nContent-Type: text/plain\r\n\r\npartialword\r\n")
 	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "p", Raw: raw, Partial: true})
@@ -191,8 +191,8 @@ func TestPartialEmlxIndexedAndRetried(t *testing.T) {
 	if got := search(t, ix, "partialword"); !slices.Equal(got, []int64{id}) {
 		t.Errorf("partial body not indexed: %v", got)
 	}
-	if pendingCount(t, ix) != 1 {
-		t.Errorf("partial message should stay pending")
+	if n := pendingCount(t, ix); n != 0 {
+		t.Errorf("partial message must not stay pending: %d", n)
 	}
 }
 
@@ -299,7 +299,10 @@ func TestPendingRetryRotates(t *testing.T) {
 	defer func() { pendingBatch = oldBatch }()
 	pendingBatch = 2
 	for i := 0; i < 3; i++ {
-		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "p", Partial: true})
+		fid := add(f, "p", "x")
+		fsm, fmb, _ := st.Get(ctx, fid)
+		fp, _, _ := st.EmlxPath(fsm.ID, fmb)
+		os.Remove(fp) // no emlx: stays pending
 	}
 	late := add(f, "late", "rotateword")
 	sm, mb, _ := st.Get(ctx, late)
