@@ -31,6 +31,9 @@ type Filter struct {
 	HasAttachments   *bool
 	IDs              []int64
 	Limit, Offset    int
+	// Skip, when set, drops matching messages before dedup and paging (it sees
+	// Summary.AccountUUID and MessageID); used to hide erased messages.
+	Skip func(Summary) bool
 }
 
 // Summary is the index-level description of one message.
@@ -351,6 +354,9 @@ rowLoop:
 		}
 		mb := byID[mid]
 		sm.Account, sm.Mailbox, sm.AccountUUID = accountName(names, mb.AccountUUID), mb.Name, mb.AccountUUID
+		if f.Skip != nil && f.Skip(sm) {
+			continue
+		}
 		if !fn(sm, mb) {
 			break
 		}

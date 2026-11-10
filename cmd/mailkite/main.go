@@ -49,7 +49,7 @@ func run(ctx context.Context, args []string) error {
 	openIndex := func() (*fts.Index, error) { return fts.Open("") }
 	switch {
 	case len(args) == 0:
-		srv, closeAll := server.NewLazy(openStore, openIndex, server.Options{})
+		srv, closeAll := server.NewLazy(openStore, openIndex, server.Options{Version: version})
 		defer closeAll()
 		return srv.Run(ctx, &mcp.StdioTransport{})
 	case args[0] == "version":

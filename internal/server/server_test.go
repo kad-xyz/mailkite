@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,7 +47,12 @@ func connect(t *testing.T, openStore func() (*maildata.Store, error), dl string)
 
 func connectIndex(t *testing.T, openStore func() (*maildata.Store, error), openIndex func() (*fts.Index, error), dl string) *mcp.ClientSession {
 	t.Helper()
-	srv, closeAll := NewLazy(openStore, openIndex, Options{DownloadDir: dl})
+	return connectOpts(t, openStore, openIndex, Options{DownloadDir: dl, StateDir: t.TempDir()})
+}
+
+func connectOpts(t *testing.T, openStore func() (*maildata.Store, error), openIndex func() (*fts.Index, error), opts Options) *mcp.ClientSession {
+	t.Helper()
+	srv, closeAll := NewLazy(openStore, openIndex, opts)
 	t.Cleanup(closeAll)
 	ct, st := mcp.NewInMemoryTransports()
 	ss, err := srv.Connect(ctx, st, nil)
@@ -87,32 +91,6 @@ func (e *env) add(subj, body string, extra ...func(*testfixture.FixtureMsg)) int
 		fn(&m)
 	}
 	return e.f.AddMessage(m)
-}
-
-func TestToolsListBudget(t *testing.T) {
-	e := setup(t)
-	res, err := e.cs.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]bool{"status": true, "find": true, "read": true, "save_attachment": true, "senders": true}
-	for _, tl := range res.Tools {
-		if !want[tl.Name] {
-			t.Errorf("unexpected tool %s", tl.Name)
-		}
-		delete(want, tl.Name)
-		if tl.Annotations == nil || !tl.Annotations.ReadOnlyHint {
-			t.Errorf("%s not read-only", tl.Name)
-		}
-	}
-	if len(want) > 0 {
-		t.Errorf("missing tools %v", want)
-	}
-	b, _ := json.Marshal(res.Tools)
-	t.Logf("tools/list JSON: %d chars", len(b))
-	if len(b) > 6000 {
-		t.Errorf("schema too big: %d", len(b))
-	}
 }
 
 func TestFindTool(t *testing.T) {

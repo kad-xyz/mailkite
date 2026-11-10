@@ -32,6 +32,7 @@ func (h *handlers) addSenders(srv *mcp.Server) {
 			if in.Mailbox != "" {
 				mailboxFilter(&f, in.Mailbox)
 			}
+			f.Skip = h.hiddenFilter(ctx, st, false)
 			minCount, limit := in.MinCount, in.Limit
 			if minCount <= 0 {
 				minCount = 2

@@ -51,6 +51,7 @@ func (h *handlers) addFind(srv *mcp.Server) {
 			if in.Mailbox != "" {
 				mailboxFilter(&f, in.Mailbox)
 			}
+			f.Skip = h.hiddenFilter(ctx, st, true)
 			limit, offset := in.Limit, max(in.Offset, 0)
 			if limit <= 0 {
 				limit = 20

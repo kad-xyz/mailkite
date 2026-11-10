@@ -6,14 +6,22 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/kad-xyz/mailkite/internal/actions"
 	"github.com/kad-xyz/mailkite/internal/fts"
 	"github.com/kad-xyz/mailkite/internal/maildata"
+	"github.com/kad-xyz/mailkite/internal/safety"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Options configures the server.
 type Options struct {
 	DownloadDir string // where save_attachment writes; default ~/Downloads
+	Version     string // reported by the server and used in one-click unsubscribe requests
+	// StateDir holds state.sqlite, actions.log and archive/; default ~/Library/Application Support/mailkite.
+	StateDir string
+	// Engine builds the write engine; nil means the real one (config, Keychain, osascript).
+	// It is called for every write-tool call, so it must return the same Plans each time.
+	Engine func(st *maildata.Store, state *safety.State) (*actions.Engine, error)
 }
 
 // lazy opens a resource on first use and retries after a failure.
@@ -48,8 +56,12 @@ func (l *lazy[T]) peek() (v T, ok bool) {
 type handlers struct {
 	store *lazy[*maildata.Store]
 	index *lazy[*fts.Index]
+	state *lazy[*safety.State]
+	plans *safety.Plans // one per process: plan ids from previews are executed through it
 	opts  Options
 	reads readCache
+
+	erasePlans erasePlans
 }
 
 // Close releases whatever has been opened.
@@ -59,6 +71,9 @@ func (h *handlers) close() {
 	}
 	if ix, ok := h.index.peek(); ok {
 		ix.Close()
+	}
+	if sd, ok := h.state.peek(); ok {
+		sd.Close()
 	}
 }
 
@@ -81,13 +96,19 @@ func build(st *lazy[*maildata.Store], ix *lazy[*fts.Index], opts Options) (*mcp.
 			opts.DownloadDir = filepath.Join(home, "Downloads")
 		}
 	}
-	h := &handlers{store: st, index: ix, opts: opts}
-	srv := mcp.NewServer(&mcp.Implementation{Name: "mailkite", Version: "dev"}, nil)
+	h := &handlers{store: st, index: ix, opts: opts, plans: &safety.Plans{}}
+	h.state = &lazy[*safety.State]{open: func() (*safety.State, error) { return safety.OpenState(h.stateDir()) }}
+	version := opts.Version
+	if version == "" {
+		version = "dev"
+	}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "mailkite", Version: version}, nil)
 	h.addStatus(srv)
 	h.addFind(srv)
 	h.addRead(srv)
 	h.addSaveAttachment(srv)
 	h.addSenders(srv)
+	h.addWrite(srv)
 	return srv, h.close
 }
 

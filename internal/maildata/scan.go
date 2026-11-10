@@ -2,6 +2,7 @@ package maildata
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 )
 
@@ -66,4 +67,44 @@ func (s *Store) LiveIDs(ctx context.Context) (map[int64]struct{}, error) {
 		out[id] = struct{}{}
 	}
 	return out, rows.Err()
+}
+
+// MsgKey identifies a message the way Mail's index does: Mail account UUID and
+// Message-ID header (as stored, with angle brackets).
+type MsgKey struct{ Account, MessageID string }
+
+// PresentKeys returns which of keys still have a non-deleted message in the index,
+// in any mailbox of that account (Trash included). It looks up only the given
+// Message-IDs, not the whole index.
+func (s *Store) PresentKeys(ctx context.Context, keys []MsgKey) (map[MsgKey]bool, error) {
+	out := map[MsgKey]bool{}
+	const batch = 400
+	for i := 0; i < len(keys); i += batch {
+		chunk := keys[i:min(i+batch, len(keys))]
+		args := make([]any, len(chunk))
+		for j, k := range chunk {
+			args[j] = k.MessageID
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT g.message_id_header, b.url FROM messages m
+			JOIN message_global_data g ON g.ROWID = m.global_message_id
+			JOIN mailboxes b ON b.ROWID = m.mailbox
+			WHERE m.deleted = 0 AND g.message_id_header IN (?`+strings.Repeat(",?", len(chunk)-1)+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id, u sql.NullString
+			if err := rows.Scan(&id, &u); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[MsgKey{Account: ParseMailboxURL(0, u.String).AccountUUID, MessageID: id.String}] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
 }

@@ -31,6 +31,7 @@ type readInput struct {
 // loaded is a message found in the index, with its raw bytes when downloaded.
 type loaded struct {
 	sm      maildata.Summary
+	mb      maildata.Mailbox
 	raw     []byte // nil when the body is not on disk
 	partial bool
 	emlx    string // path of the .emlx file
@@ -115,31 +116,71 @@ func (h *handlers) readMessage(ctx context.Context, id int64) (*loaded, *parsed,
 	if err != nil {
 		return nil, nil, err
 	}
-	l := &loaded{sm: sm}
+	if skip := h.hiddenFilter(ctx, st, false); skip != nil && skip(sm) {
+		return nil, nil, fmt.Errorf("message %d not found", id)
+	}
+	l := &loaded{sm: sm, mb: mb}
 	p, partial, ok := st.EmlxPath(id, mb)
 	if !ok {
-		return l, nil, nil
+		return l, h.fetchOverIMAP(ctx, l), nil
 	}
 	l.partial, l.emlx = partial, p
+	v, err := h.parseEmlx(p, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if l.partial && len(v.m.Text) == 0 && len(v.m.Parts) == 0 {
+		if fv := h.fetchOverIMAP(ctx, l); fv != nil {
+			return l, fv, nil
+		}
+	}
+	return l, v, nil
+}
+
+// parseEmlx parses the .emlx file at p, through the one-message cache.
+func (h *handlers) parseEmlx(p string, id int64) (*parsed, error) {
 	fi, statErr := os.Stat(p)
 	if statErr == nil {
 		if v := h.reads.get(p, fi); v != nil {
-			return l, v, nil
+			return v, nil
 		}
 	}
 	raw, err := message.ReadEmlx(p)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot read message %d: %w", id, err)
+		return nil, fmt.Errorf("cannot read message %d: %w", id, err)
 	}
 	m, err := message.Parse(raw)
 	if err != nil {
-		return nil, nil, fmt.Errorf("cannot parse message %d: %w", id, err)
+		return nil, fmt.Errorf("cannot parse message %d: %w", id, err)
 	}
-	v := &parsed{m: m, ex: sync.OnceValue(func() message.Extracted { return message.Extract(m, m.HTML()) }), hdr: headerBlock(raw)}
+	v := newParsed(m, raw)
 	if statErr == nil {
 		h.reads.put(p, fi, v)
 	}
-	return l, v, nil
+	return v, nil
+}
+
+func newParsed(m *message.Message, raw []byte) *parsed {
+	return &parsed{m: m, ex: sync.OnceValue(func() message.Extracted { return message.Extract(m, m.HTML()) }), hdr: headerBlock(raw)}
+}
+
+// fetchOverIMAP reads a body Mail has not downloaded from the account's IMAP server
+// (BODY.PEEK[], so it stays unread). Any failure returns nil: read then says
+// "not downloaded". The result is not cached on disk or in memory.
+func (h *handlers) fetchOverIMAP(ctx context.Context, l *loaded) *parsed {
+	eng, err := h.engine()
+	if err != nil || len(eng.Cfg.Accounts) == 0 {
+		return nil
+	}
+	raw, err := eng.FetchBody(ctx, l.sm, l.mb)
+	if err != nil {
+		return nil
+	}
+	m, err := message.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	return newParsed(m, raw)
 }
 
 func (h *handlers) addRead(srv *mcp.Server) {
