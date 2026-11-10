@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -63,6 +64,17 @@ type CleanupRequest struct {
 	Action      string   // erase|trash|read|move
 	MoveTo      string
 	Unsubscribe bool
+	// AllowProtected lists message IDs that may be included although protected;
+	// only those that the filter and senders also select.
+	AllowProtected []int64
+}
+
+// MarkRequest changes flags of, or moves, explicitly listed messages.
+type MarkRequest struct {
+	IDs            []int64
+	Action         string // read|unread|flag|unflag|move
+	MoveTo         string
+	AllowProtected []int64 // for move: protected IDs that may still be moved
 }
 
 // SenderCount is one line of a preview: how many messages a sender has in the plan.
@@ -116,7 +128,8 @@ type planExtra struct {
 	MoveTo      string
 	Unsubscribe bool
 	Names       map[string]string // account UUID -> account name, for reports
-	Protected   int
+	Protected   int               // protected messages left out
+	Included    int               // protected messages included on request
 }
 
 func (e *Engine) now() time.Time {
@@ -133,9 +146,9 @@ func (e *Engine) markLimit() int {
 	return config.DefaultMarkLimit
 }
 
-func (e *Engine) hidden(ctx context.Context) (map[string]struct{}, error) {
+func (e *Engine) hidden(ctx context.Context) (map[safety.HiddenKey]struct{}, error) {
 	if e.State == nil {
-		return map[string]struct{}{}, nil
+		return map[safety.HiddenKey]struct{}{}, nil
 	}
 	return e.State.Hidden(ctx)
 }
@@ -148,12 +161,19 @@ type candidate struct {
 // senderMatcher turns "a@b.c" into an exact address match and "@b.c" or "b.c" into
 // a domain match that includes subdomains. needle is the Filter.From substring
 // that finds a superset of the matches in the index.
+// isAddress reports a full address (local@domain), not "@domain" or a fragment.
+func isAddress(s string) bool {
+	s = strings.TrimSpace(s)
+	l, d, ok := strings.Cut(s, "@")
+	return ok && l != "" && d != "" && !strings.ContainsAny(s, " <>")
+}
+
 func senderMatcher(spec string) (needle string, match func(addr string) bool) {
 	spec = strings.ToLower(strings.TrimSpace(spec))
 	if spec == "" {
 		return "", nil
 	}
-	if !strings.HasPrefix(spec, "@") && strings.Contains(spec, "@") {
+	if isAddress(spec) {
 		return spec, func(addr string) bool { return strings.EqualFold(strings.TrimSpace(addr), spec) }
 	}
 	d := strings.TrimPrefix(spec, "@")
@@ -185,7 +205,14 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 		match  func(string) bool
 	}
 	var specs []spec
-	for _, s := range r.Senders {
+	senders := r.Senders
+	fromNeedle := strings.ToLower(r.Filter.From)
+	if isAddress(r.Filter.From) {
+		// A full address means exactly that sender, not a substring of others.
+		senders = append(slices.Clone(senders), r.Filter.From)
+		r.Filter.From, fromNeedle = "", ""
+	}
+	for _, s := range senders {
 		if n, m := senderMatcher(s); m != nil {
 			specs = append(specs, spec{n, m})
 		}
@@ -193,7 +220,6 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 	if len(specs) == 0 {
 		specs = []spec{{}}
 	}
-	fromNeedle := strings.ToLower(r.Filter.From)
 	seen := map[string]bool{}
 	var out []candidate
 	for _, sp := range specs {
@@ -221,14 +247,6 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 					!strings.Contains(strings.ToLower(sm.FromName), fromNeedle) {
 					continue
 				}
-				k := fmt.Sprintf("r:%d", sm.ID)
-				if sm.MessageID != "" {
-					k = "m:" + sm.MessageID
-				}
-				if seen[k] {
-					continue
-				}
-				seen[k] = true
 				_, mb, err := e.Store.Get(ctx, sm.ID)
 				if errors.Is(err, maildata.ErrNotFound) {
 					continue // gone from Mail's index meanwhile
@@ -236,6 +254,14 @@ func (e *Engine) collect(ctx context.Context, r CleanupRequest) ([]candidate, er
 				if err != nil {
 					return nil, err
 				}
+				k := fmt.Sprintf("r:%d", sm.ID)
+				if sm.MessageID != "" {
+					k = "m:" + mb.AccountUUID + "\x00" + sm.MessageID
+				}
+				if seen[k] {
+					continue
+				}
+				seen[k] = true
 				out = append(out, candidate{sm, mb})
 				if len(out) > maxCleanup {
 					return nil, errTooMany()
@@ -269,12 +295,13 @@ func (e *Engine) parseLocal(id int64, mb maildata.Mailbox) *message.Message {
 
 // builder accumulates plan targets account by account.
 type builder struct {
-	targets map[string][]safety.Target
-	names   map[string]string
-	senders map[string]int
-	skipped map[string]map[string]int // account name -> reason -> count
-	count   int
-	byAcc   map[string]int
+	targets  map[string][]safety.Target
+	names    map[string]string
+	senders  map[string]int
+	skipped  map[string]map[string]int // account name -> reason -> count
+	count    int
+	included int // protected messages included on request
+	byAcc    map[string]int
 }
 
 func newBuilder() *builder {
@@ -371,15 +398,12 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 	}
 	var p Preview
 	b := newBuilder()
+	allow := idSet(r.AllowProtected)
 	for _, c := range cands {
-		if _, h := hidden[c.sm.MessageID]; h && c.sm.MessageID != "" {
+		if isHidden(hidden, c.mb.AccountUUID, c.sm.MessageID) {
 			continue
 		}
-		if prot, why := safety.Classify(e.parseLocal(c.sm.ID, c.mb), c.sm, e.Cfg.Rules); prot {
-			p.Protected = append(p.Protected, ProtectedMsg{ID: c.sm.ID, From: c.sm.From, Subject: c.sm.Subject, Reason: why})
-			continue
-		}
-		if err := e.add(ctx, b, c.sm, c.mb, r.Action); err != nil {
+		if err := e.addChecked(ctx, b, &p, c.sm, c.mb, r.Action, allow); err != nil {
 			return Preview{}, err
 		}
 	}
@@ -387,11 +411,46 @@ func (e *Engine) BuildCleanup(ctx context.Context, r CleanupRequest) (Preview, e
 	if b.count == 0 {
 		return p, nil
 	}
-	x := planExtra{Op: r.Action, MoveTo: r.MoveTo, Unsubscribe: r.Unsubscribe, Names: b.names, Protected: len(p.Protected)}
+	x := planExtra{Op: r.Action, MoveTo: r.MoveTo, Unsubscribe: r.Unsubscribe, Names: b.names,
+		Protected: len(p.Protected), Included: b.included}
 	if err := e.store(&p, cleanupPrefix+r.Action, b, x); err != nil {
 		return Preview{}, err
 	}
 	return p, nil
+}
+
+func idSet(ids []int64) map[int64]bool {
+	m := map[int64]bool{}
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
+}
+
+func isHidden(h map[safety.HiddenKey]struct{}, account, messageID string) bool {
+	if messageID == "" {
+		return false
+	}
+	_, ok := h[safety.HiddenKey{Account: account, MessageID: messageID}]
+	return ok
+}
+
+// addChecked leaves protected messages out (listing them in p.Protected) unless
+// their ID is in allow, then adds the message as a target.
+func (e *Engine) addChecked(ctx context.Context, b *builder, p *Preview, sm maildata.Summary, mb maildata.Mailbox, op string, allow map[int64]bool) error {
+	prot, why := safety.Classify(e.parseLocal(sm.ID, mb), sm, e.Cfg.Rules)
+	if prot && !allow[sm.ID] {
+		p.Protected = append(p.Protected, ProtectedMsg{ID: sm.ID, From: sm.From, Subject: sm.Subject, Reason: why})
+		return nil
+	}
+	before := b.count
+	if err := e.add(ctx, b, sm, mb, op); err != nil {
+		return err
+	}
+	if prot && b.count > before {
+		b.included++
+	}
+	return nil
 }
 
 func (e *Engine) newPlan(action string, b *builder, x planExtra, p *Preview) (safety.Plan, error) {
@@ -408,11 +467,12 @@ func (e *Engine) store(p *Preview, action string, b *builder, x planExtra) error
 	return nil
 }
 
-// BuildMark previews flag changes or a move for explicitly listed messages
-// (protected ones included: they were picked one by one). Up to Cfg.MarkLimit
-// messages are changed at once without a dialog, except a move to Trash or Junk;
-// otherwise a plan is stored for Execute.
-func (e *Engine) BuildMark(ctx context.Context, ids []int64, action, moveTo string) (Preview, bool, error) {
+// BuildMark previews flag changes or a move for explicitly listed messages. Flag
+// changes (read, unread, flag, unflag) of up to Cfg.MarkLimit messages run at once
+// without a dialog; they apply to protected messages too. A move always becomes a
+// plan for Execute and leaves protected messages out unless r.AllowProtected lists them.
+func (e *Engine) BuildMark(ctx context.Context, r MarkRequest) (Preview, bool, error) {
+	ids, action, moveTo := r.IDs, r.Action, r.MoveTo
 	if err := validOp(action, moveTo, "read", "unread", "flag", "unflag", "move"); err != nil {
 		return Preview{}, false, err
 	}
@@ -425,6 +485,7 @@ func (e *Engine) BuildMark(ctx context.Context, ids []int64, action, moveTo stri
 	}
 	var p Preview
 	b := newBuilder()
+	allow := idSet(r.AllowProtected)
 	done := map[int64]bool{}
 	for _, id := range ids {
 		if done[id] {
@@ -439,7 +500,7 @@ func (e *Engine) BuildMark(ctx context.Context, ids []int64, action, moveTo stri
 		if err != nil {
 			return Preview{}, false, err
 		}
-		if _, h := hidden[sm.MessageID]; h && sm.MessageID != "" {
+		if isHidden(hidden, mb.AccountUUID, sm.MessageID) {
 			p.Skipped = append(p.Skipped, fmt.Sprintf("id %d: already erased", id))
 			continue
 		}
@@ -447,7 +508,12 @@ func (e *Engine) BuildMark(ctx context.Context, ids []int64, action, moveTo stri
 			b.skip(sm.Account, "POP account: marks are not supported")
 			continue
 		}
-		if err := e.add(ctx, b, sm, mb, action); err != nil {
+		if action == "move" {
+			err = e.addChecked(ctx, b, &p, sm, mb, action, allow)
+		} else {
+			err = e.add(ctx, b, sm, mb, action)
+		}
+		if err != nil {
 			return Preview{}, false, err
 		}
 	}
@@ -458,9 +524,8 @@ func (e *Engine) BuildMark(ctx context.Context, ids []int64, action, moveTo stri
 	if b.count == 0 {
 		return p, false, nil
 	}
-	x := planExtra{Op: action, MoveTo: moveTo, Names: b.names}
-	risky := action == "move" && (maildata.NameRole(moveTo) == maildata.RoleTrash || maildata.NameRole(moveTo) == maildata.RoleJunk)
-	if b.count <= e.markLimit() && !risky {
+	x := planExtra{Op: action, MoveTo: moveTo, Names: b.names, Protected: len(p.Protected), Included: b.included}
+	if b.count <= e.markLimit() && action != "move" {
 		plan, err := e.newPlan(markPrefix+action, b, x, &p)
 		if err != nil {
 			return Preview{}, false, err
@@ -802,14 +867,14 @@ func (e *Engine) eraseBox(ctx context.Context, conn IMAP, acc config.Account, uu
 	for _, u := range res.Erased {
 		ids = append(ids, idOf[u])
 	}
-	e.hide(ids, now, r)
+	e.hide(uuid, ids, now, r)
 }
 
-func (e *Engine) hide(ids []string, now time.Time, r *result) {
+func (e *Engine) hide(uuid string, ids []string, now time.Time, r *result) {
 	if len(ids) == 0 || e.State == nil {
 		return
 	}
-	if err := e.State.Hide(ids, now); err != nil {
+	if err := e.State.Hide(uuid, ids, now); err != nil {
 		r.notes = append(r.notes, "erased messages may still show until Mail syncs: "+err.Error())
 	}
 }
@@ -851,16 +916,29 @@ func (e *Engine) runPOP(ctx context.Context, uuid string, ts []safety.Target, x 
 	if len(ids) == 0 {
 		return r
 	}
-	n, err := e.POP.Delete(ctx, uuid, ids)
-	n = max(0, min(n, len(ids)))
-	r.done += n
-	if err != nil {
-		r.fail(len(ids)-n, "pop_failed", "Mail: "+err.Error())
-		return r
+	deleted, err := e.POP.Delete(ctx, uuid, ids)
+	// Count only requested IDs Mail reported, each once.
+	want := map[string]string{}
+	for _, id := range ids {
+		want[normID(id)] = id
 	}
-	r.notFound += len(ids) - n
-	if n == len(ids) {
-		e.hide(ids, now, &r)
+	var gone []string
+	for _, d := range deleted {
+		if id, ok := want[normID(d)]; ok {
+			gone = append(gone, id)
+			delete(want, normID(d))
+		}
+	}
+	r.done += len(gone)
+	e.hide(uuid, gone, now, &r)
+	if rest := len(ids) - len(gone); rest > 0 {
+		if err != nil {
+			r.fail(rest, "pop_failed", "Mail: "+err.Error())
+		} else {
+			r.notFound += rest
+		}
+	} else if err != nil {
+		r.notes = append(r.notes, "Mail: "+err.Error())
 	}
 	return r
 }
@@ -936,6 +1014,9 @@ func summary(x planExtra, p *Preview, byAcc map[string]int) string {
 		accs = append(accs, fmt.Sprintf("%s — %d", name, byAcc[name]))
 	}
 	b.WriteString("\n\nАккаунты: " + strings.Join(accs, ", "))
+	if x.Included > 0 {
+		fmt.Fprintf(&b, "\nincluding %d protected messages", x.Included)
+	}
 	if x.Protected > 0 {
 		fmt.Fprintf(&b, "\nЗащищённые письма не тронуты: %d", x.Protected)
 	}

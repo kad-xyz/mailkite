@@ -80,6 +80,23 @@ func TestFindDedupGmail(t *testing.T) {
 	}
 }
 
+func TestFindDedupPerAccount(t *testing.T) {
+	f := testfixture.New(t)
+	f.AddAccount("A", "Work", "IMAP")
+	f.AddAccount("B", "Home", "IMAP")
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "n@shop.example", MessageID: "<a@x>", Subject: "s", Received: tm(1)})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://B/INBOX", From: "n@shop.example", MessageID: "<a@x>", Subject: "s", Received: tm(1)})
+	s := openFix(t, f)
+	items, _, err := s.Find(ctx, Filter{})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("same Message-ID in two accounts must both show: %+v %v", items, err)
+	}
+	g, err := s.Senders(ctx, Filter{}, 1)
+	if err != nil || len(g) != 1 || g[0].Count != 2 {
+		t.Fatalf("senders %+v %v", g, err)
+	}
+}
+
 func TestFindExcludesTrashAndDeleted(t *testing.T) {
 	f := testfixture.New(t)
 	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/Deleted%20Messages", Subject: "in trash"})

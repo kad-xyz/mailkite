@@ -17,13 +17,19 @@ func TestStateHideLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	if err := st.Hide([]string{"a@x", "b@x", ""}, now); err != nil {
+	if err := st.Hide("UUID-1", []string{"a@x", "b@x", ""}, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Hide([]string{"a@x"}, now); err != nil { // idempotent
+	if err := st.Hide("UUID-1", []string{"a@x"}, now); err != nil { // idempotent
 		t.Fatal(err)
 	}
-	if err := st.Unhide([]string{"b@x"}); err != nil {
+	if err := st.Hide("UUID-2", []string{"b@x"}, now); err != nil { // same id, other account
+		t.Fatal(err)
+	}
+	if err := st.Hide("", []string{"c@x"}, now); err == nil {
+		t.Fatal("empty account")
+	}
+	if err := st.Unhide("UUID-1", []string{"b@x"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Log(ActionLine{TS: now, Action: "erase", Account: "UUID-1", Count: 3, Result: "ok"}); err != nil {
@@ -42,10 +48,13 @@ func TestStateHideLog(t *testing.T) {
 	}
 	defer st.Close()
 	h, err := st.Hidden(context.Background())
-	if err != nil || len(h) != 1 {
+	if err != nil || len(h) != 2 {
 		t.Fatalf("%v %v", h, err)
 	}
-	if _, ok := h["a@x"]; !ok {
+	if _, ok := h[HiddenKey{"UUID-1", "a@x"}]; !ok {
+		t.Fatalf("%v", h)
+	}
+	if _, ok := h[HiddenKey{"UUID-2", "b@x"}]; !ok {
 		t.Fatalf("%v", h)
 	}
 	if err := st.Log(ActionLine{TS: now.Add(time.Minute), Action: "unsubscribe", Account: "UUID-2", Count: 6, Result: "partial\nline"}); err != nil {
@@ -84,7 +93,7 @@ func TestStatePathWithSpace(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if err := st.Hide([]string{"a@x"}, time.Now()); err != nil {
+	if err := st.Hide("UUID-1", []string{"a@x"}, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if h, err := st.Hidden(context.Background()); err != nil || len(h) != 1 {
@@ -92,5 +101,33 @@ func TestStatePathWithSpace(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "state.sqlite")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStateMigratesOldHiddenTable(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "mailkite")
+	st, err := OpenState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Rebuild the stage-2 draft schema (no account column) with a row in it.
+	if _, err := st.db.Exec(`DROP TABLE hidden`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`CREATE TABLE hidden(message_id TEXT PRIMARY KEY, at INTEGER); INSERT INTO hidden VALUES('old@x', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	st.Close()
+	st, err = OpenState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Hide("UUID-1", []string{"a@x"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h, err := st.Hidden(context.Background())
+	if err != nil || len(h) != 1 {
+		t.Fatalf("%v %v", h, err)
 	}
 }

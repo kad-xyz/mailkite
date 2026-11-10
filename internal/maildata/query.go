@@ -357,9 +357,11 @@ rowLoop:
 	return rows.Err()
 }
 
-func dedupKey(sm Summary) string {
+// dedupKey collapses copies of one message within an account (Gmail's INBOX and
+// All Mail); the same Message-ID in two accounts is two messages.
+func dedupKey(sm Summary, mb Mailbox) string {
 	if sm.MessageID != "" {
-		return "m:" + sm.MessageID
+		return "m:" + mb.AccountUUID + "\x00" + sm.MessageID
 	}
 	return fmt.Sprintf("r:%d", sm.ID)
 }
@@ -374,7 +376,7 @@ func (s *Store) Find(ctx context.Context, f Filter) (items []Summary, more bool,
 	var uniq []entry
 	pos := map[string]int{}
 	err = s.scan(ctx, f, func(sm Summary, mb Mailbox) bool {
-		k := dedupKey(sm)
+		k := dedupKey(sm, mb)
 		if i, ok := pos[k]; ok {
 			if uniq[i].isAll && mb.Role != RoleAll {
 				uniq[i] = entry{sm, false}
@@ -434,7 +436,7 @@ func (s *Store) Senders(ctx context.Context, f Filter, minCount int) ([]SenderGr
 		if byDefault && (mb.Role == RoleSent || mb.Role == RoleDrafts) {
 			return true // our own addresses, not senders
 		}
-		k := dedupKey(sm)
+		k := dedupKey(sm, mb)
 		if seen[k] {
 			return true
 		}

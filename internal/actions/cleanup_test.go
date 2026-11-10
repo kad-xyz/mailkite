@@ -205,13 +205,17 @@ type fakePOP struct {
 	uuid    string
 	archive string // archive dir, to count .eml at call time
 	emlSeen int
+	reply   func(ids []string) []string // nil: all deleted
 }
 
-func (p *fakePOP) Delete(_ context.Context, uuid string, ids []string) (int, error) {
+func (p *fakePOP) Delete(_ context.Context, uuid string, ids []string) ([]string, error) {
 	p.uuid = uuid
 	p.calls = append(p.calls, slices.Clone(ids))
 	p.emlSeen = countEml(p.archive)
-	return len(ids), nil
+	if p.reply != nil {
+		return p.reply(ids), nil
+	}
+	return slices.Clone(ids), nil
 }
 
 type env struct {
@@ -585,7 +589,7 @@ func TestExecuteNotFoundOnServer(t *testing.T) {
 		t.Fatalf("archive %d: a message not on the server is not archived", countEml(v.e.Archive.Dir))
 	}
 	h, _ := v.e.State.Hidden(ctxT(t))
-	if _, ok := h[gone]; ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidA, MessageID: gone}]; ok {
 		t.Fatal("not-found message must not be hidden")
 	}
 }
@@ -665,10 +669,10 @@ func TestExecuteHidesErased(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := h[id1]; !ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidA, MessageID: id1}]; !ok {
 		t.Fatalf("hidden %v", h)
 	}
-	if _, ok := h[id2]; !ok {
+	if _, ok := h[safety.HiddenKey{Account: uuidA, MessageID: id2}]; !ok {
 		t.Fatalf("hidden %v", h)
 	}
 	// Hidden messages are not offered again.
@@ -765,7 +769,7 @@ func TestMarkSmallExecutesNow(t *testing.T) {
 	none := ""
 	r1, _ := v.add(uuidA, "Иван <ivan@example.org>", "Привет", "Как дела?", msgOpt{headers: &none}) // protected: fine for mark
 	r2, _ := v.add(uuidA, "Shop <news@shop.example>", "Скидки", "Распродажа", msgOpt{})
-	p, now, err := v.e.BuildMark(ctxT(t), []int64{r1, r2}, "flag", "")
+	p, now, err := v.e.BuildMark(ctxT(t), MarkRequest{IDs: []int64{r1, r2}, Action: "flag"})
 	if err != nil || !now || p.PlanID != "" || p.Count != 2 {
 		t.Fatalf("p %+v now %v err %v", p, now, err)
 	}
@@ -794,7 +798,7 @@ func TestMarkLargeNeedsPlan(t *testing.T) {
 		id, _ := v.add(uuidA, "Shop <news@shop.example>", fmt.Sprintf("Скидки %d", i), "Распродажа", msgOpt{})
 		ids = append(ids, id)
 	}
-	p, now, err := v.e.BuildMark(ctxT(t), ids, "read", "")
+	p, now, err := v.e.BuildMark(ctxT(t), MarkRequest{IDs: ids, Action: "read"})
 	if err != nil || now || p.PlanID == "" || p.Count != 3 {
 		t.Fatalf("p %+v now %v err %v", p, now, err)
 	}
@@ -805,17 +809,121 @@ func TestMarkLargeNeedsPlan(t *testing.T) {
 	if err != nil || rep.Done != 3 || v.confirm.button != "Прочитано: 3" {
 		t.Fatalf("rep %+v err %v button %q", rep, err, v.confirm.button)
 	}
-	// Moving even one message to Trash or Junk goes through the dialog.
-	for _, to := range []string{"Trash", "Junk", "[Gmail]/Spam"} {
-		p, now, err = v.e.BuildMark(ctxT(t), ids[:1], "move", to)
+	// Any move, even of one message and to any mailbox, goes through the dialog.
+	for _, to := range []string{"Trash", "Junk", "[Gmail]/Spam", "Deleted Items", "Archive"} {
+		p, now, err = v.e.BuildMark(ctxT(t), MarkRequest{IDs: ids[:1], Action: "move", MoveTo: to})
 		if err != nil || now || p.PlanID == "" {
 			t.Fatalf("%s: p %+v now %v err %v", to, p, now, err)
 		}
 	}
-	if _, _, err := v.e.BuildMark(ctxT(t), ids[:1], "move", ""); err == nil {
+	if _, _, err := v.e.BuildMark(ctxT(t), MarkRequest{IDs: ids[:1], Action: "move"}); err == nil {
 		t.Fatal("move needs a target")
 	}
-	if _, _, err := v.e.BuildMark(ctxT(t), ids[:1], "erase", ""); err == nil {
+	if _, _, err := v.e.BuildMark(ctxT(t), MarkRequest{IDs: ids[:1], Action: "erase"}); err == nil {
 		t.Fatal("mark cannot erase")
+	}
+}
+
+func TestPOPCountsOnlyReportedIDs(t *testing.T) {
+	v := newEnv(t)
+	_, id1 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 1", "Распродажа", msgOpt{})
+	_, id2 := v.add(uuidP, "Shop <news@shop.example>", "Скидки 2", "Распродажа", msgOpt{})
+	// Mail found two copies of id1 and none of id2; it also names an id never asked for.
+	v.pop.reply = func([]string) []string { return []string{norm(id1), id1, "stranger@x"} }
+	rep, err := v.e.Execute(ctxT(t), eraseShop(v).PlanID)
+	if err != nil || rep.Done != 1 || rep.NotFound != 1 || rep.Failed != 0 {
+		t.Fatalf("rep %+v err %v", rep, err)
+	}
+	h, _ := v.e.State.Hidden(ctxT(t))
+	if _, ok := h[safety.HiddenKey{Account: uuidP, MessageID: id1}]; !ok || len(h) != 1 {
+		t.Fatalf("hidden %v", h)
+	}
+	if _, ok := h[safety.HiddenKey{Account: uuidP, MessageID: id2}]; ok {
+		t.Fatal("id2 was not deleted")
+	}
+}
+
+func TestSameMessageIDInTwoAccounts(t *testing.T) {
+	v := newEnv(t)
+	shared := "<shared@shop.example>"
+	raw := rawMsg("Shop <news@shop.example>", shared, "Скидки", bulk, "Распродажа")
+	ua := v.srv["a@icloud.example"].add("INBOX", shared, raw)
+	ub := v.srv["b@gmail.example"].add("INBOX", shared, raw)
+	v.f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://" + uuidA + "/INBOX", From: "news@shop.example", Subject: "Скидки", MessageID: shared, ListID: true, Raw: raw, RemoteID: ua})
+	v.f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://" + uuidB + "/INBOX", From: "news@shop.example", Subject: "Скидки", MessageID: shared, ListID: true, Raw: raw, RemoteID: ub})
+	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Filter: maildata.Filter{Account: uuidA}, Senders: []string{"@shop.example"}, Action: "erase"})
+	if err != nil || p.Count != 1 {
+		t.Fatalf("p %+v err %v", p, err)
+	}
+	rep, err := v.e.Execute(ctxT(t), p.PlanID)
+	if err != nil || rep.Done != 1 {
+		t.Fatalf("rep %+v err %v", rep, err)
+	}
+	if v.srv["a@icloud.example"].has("INBOX", shared) || !v.srv["b@gmail.example"].has("INBOX", shared) || len(v.dials) != 1 {
+		t.Fatalf("only account A may be touched (dials %v)", v.dials)
+	}
+	// B's copy is still offered.
+	p, err = v.e.BuildCleanup(ctxT(t), CleanupRequest{Senders: []string{"@shop.example"}, Action: "erase"})
+	if err != nil || p.Count != 1 {
+		t.Fatalf("after erase: %+v %v", p, err)
+	}
+	items, _, err := v.e.Store.Find(ctxT(t), maildata.Filter{From: "shop.example"})
+	if err != nil || len(items) != 2 { // Find itself does not hide (Task 6); both accounts listed
+		t.Fatalf("find %+v %v", items, err)
+	}
+}
+
+func TestAllowProtected(t *testing.T) {
+	v := newEnv(t)
+	news, _ := v.add(uuidA, "Shop <news@shop.example>", "Скидки", "Распродажа", msgOpt{})
+	code, _ := v.add(uuidA, "Shop <news@shop.example>", "Ваш код подтверждения", "Никому", msgOpt{})
+	other, _ := v.add(uuidA, "Bank <news@bank.example>", "Ваш код входа", "Никому", msgOpt{})
+	// Default: protected excluded from cleanup and from a mark move.
+	p := eraseShop(v)
+	if p.Count != 1 || len(p.Protected) != 1 || p.Protected[0].ID != code {
+		t.Fatalf("default %+v", p)
+	}
+	p, _, err := v.e.BuildMark(ctxT(t), MarkRequest{IDs: []int64{news, code}, Action: "move", MoveTo: "Archive"})
+	if err != nil || p.Count != 1 || len(p.Protected) != 1 {
+		t.Fatalf("mark move default %+v %v", p, err)
+	}
+	// Listed and in the target set: included, and the dialog says so. other is
+	// listed but outside the target set (another sender): ignored.
+	p, err = v.e.BuildCleanup(ctxT(t), CleanupRequest{Senders: []string{"@shop.example"}, Action: "erase", AllowProtected: []int64{code, other}})
+	if err != nil || p.Count != 2 || len(p.Protected) != 0 {
+		t.Fatalf("allowed %+v %v", p, err)
+	}
+	v.confirm.answer = false
+	if _, err := v.e.Execute(ctxT(t), p.PlanID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(v.confirm.body, "including 1 protected messages") || v.confirm.button != "Стереть 2" {
+		t.Fatalf("dialog %q %q", v.confirm.body, v.confirm.button)
+	}
+	p, _, err = v.e.BuildMark(ctxT(t), MarkRequest{IDs: []int64{news, code}, Action: "move", MoveTo: "Archive", AllowProtected: []int64{code, other}})
+	if err != nil || p.Count != 2 || p.PlanID == "" {
+		t.Fatalf("mark allowed %+v %v", p, err)
+	}
+	if _, err := v.e.Execute(ctxT(t), p.PlanID); err != nil || !strings.Contains(v.confirm.body, "including 1 protected messages") {
+		t.Fatalf("mark dialog %q %v", v.confirm.body, err)
+	}
+}
+
+func TestFromAddressIsExact(t *testing.T) {
+	v := newEnv(t)
+	v.add(uuidA, "A <a@x.com>", "Скидки", "Распродажа", msgOpt{})
+	v.add(uuidA, "AA <aa@x.com>", "Скидки", "Распродажа", msgOpt{})
+	for _, r := range []CleanupRequest{
+		{Filter: maildata.Filter{From: "A@X.com"}, Action: "erase"},
+		{Senders: []string{"a@x.com"}, Action: "erase"},
+	} {
+		p, err := v.e.BuildCleanup(ctxT(t), r)
+		if err != nil || p.Count != 1 || p.BySender[0].Sender != "a@x.com" {
+			t.Fatalf("%+v: %+v %v", r, p, err)
+		}
+	}
+	p, err := v.e.BuildCleanup(ctxT(t), CleanupRequest{Filter: maildata.Filter{From: "x.com"}, Action: "erase"})
+	if err != nil || p.Count != 2 {
+		t.Fatalf("substring From still works for non-addresses: %+v %v", p, err)
 	}
 }
