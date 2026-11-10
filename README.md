@@ -1,13 +1,13 @@
 # mailkite
 
-A small, fast MCP server for Apple Mail on macOS. It reads Mail's own local data directly, so searches take a fraction of a millisecond, the process uses no CPU while idle, and the tool descriptions cost very few tokens.
+A small, fast MCP server for Apple Mail on macOS. It reads Mail's own local data directly, so searches take a fraction of a millisecond on a small mailbox (measured on about 110 messages), the process uses no CPU while idle, and the tool descriptions cost very few tokens.
 
 Stage 1 is read-only. Writing tools (move, delete, send) are on the roadmap and will require a native macOS confirmation dialog.
 
 ## Why
 
 - **Fast.** Queries read the Envelope Index and `.emlx` files directly: no AppleScript, no IMAP round trips.
-- **Tiny idle footprint.** One static Go binary, no background threads, timers or indexing daemons. CPU is 0 while idle.
+- **No idle cost.** One static Go binary with no background work: no timers, no indexing daemons, so CPU is 0 while idle. (Memory is moderate, see the benchmark.)
 - **Token-lean.** Five tools, about 700 tokens of schema in total. Replies are one line per message; `read` returns at most 4000 characters by default and pages with `offset`.
 - **Useful output.** `read` extracts verification codes, links and the attachment list up front, and gives a `message://` link that opens the message in Mail.
 
@@ -33,7 +33,7 @@ Measured on one Mac (Apple silicon) with a stdio MCP client, same scenarios for 
 
 mailkite keeps the last parsed message, so the repeated read above is served from that cache; the uncached figure is the same message parsed from disk on every call. About 15 MB of its RSS is there before the first call: the MCP SDK links `net/http`, which on macOS loads the CoreFoundation and Security frameworks, and SQLite's code adds a few more once the mail index is opened.
 
-mailkite is not the smallest or the lowest-memory option; its advantages here are the schema size and the compact, pre-digested replies. All servers are sub-2 ms on this mailbox except the AppleScript- and Swift-based one.
+mailkite is not the smallest or the lowest-memory option; its advantages here are the schema size and the compact, pre-digested replies. On this small mailbox every server except the AppleScript- and Swift-based one answers in about a millisecond or less, and mailidx's status call takes 8.5 ms.
 
 ## Install
 
@@ -50,6 +50,10 @@ git clone https://github.com/kad-xyz/mailkite
 cd mailkite
 CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/mailkite ./cmd/mailkite
 ```
+
+### Command line
+
+Besides the stdio server (no arguments), the binary has two subcommands: `mailkite index` builds the full-text search index from scratch (otherwise it is built on the first `find` with `query`), and `mailkite version` prints the version.
 
 ### Full Disk Access
 
@@ -79,14 +83,14 @@ All five tools are annotated read-only.
 
 - The first `find` with `query` builds the full-text search index inside that call; later calls only add new messages.
 - A `query` combined with narrowing filters (account, mailbox, sender, dates, flags) searches the top 500 text matches and then applies the filters.
-- `save_attachment` only writes inside your home directory, and never into `~/Library` or dot-folders. The default is `~/Downloads`.
+- `save_attachment` writes only inside `~/Downloads` (the default; subfolders are allowed) and never overwrites existing files. To allow other folders, set `MAILKITE_SAVE_DIRS` in the server's environment to a colon-separated list of absolute paths; `~/Library` and dot-folders are always refused, and the folders cannot be chosen through tool arguments.
 - `read` returns up to 4000 characters by default (maximum 20000); continue with `offset`.
 
 ## Privacy
 
 Everything is local. mailkite makes no network connections. Mail's data is opened read-only. The search index is stored at `~/Library/Caches/mailkite` with `0600` permissions and can be deleted at any time; it is rebuilt on demand.
 
-Since all current tools are read-only, it is reasonable to auto-approve them in your MCP client. Do not blanket-approve future writing tools.
+Since all current tools are read-only and `save_attachment` is confined to `~/Downloads` (plus any folders you list in `MAILKITE_SAVE_DIRS`, so list only folders you would not mind receiving files), it is reasonable to auto-approve them in your MCP client. Do not blanket-approve future writing tools.
 
 ## Roadmap
 
