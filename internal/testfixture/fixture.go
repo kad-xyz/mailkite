@@ -49,6 +49,16 @@ type FixtureMsg struct {
 	Attachments                                    []string
 	Raw                                            []byte
 	Partial                                        bool
+	// External holds attachment files Mail stores outside a .partial.emlx,
+	// under Data/.../Attachments/<rowid>/<Part>/<Name>.
+	External []ExternalAttachment
+}
+
+// ExternalAttachment is one separately stored attachment file.
+type ExternalAttachment struct {
+	Part int
+	Name string
+	Data []byte
 }
 
 // Fixture is a temporary analogue of ~/Library/Mail.
@@ -237,6 +247,11 @@ func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
 	must(os.MkdirAll(filepath.Dir(p), 0o755))
 	body := strconv.Itoa(len(m.Raw)) + "\n" + string(m.Raw) + emlxTail
 	must(os.WriteFile(p, []byte(body), 0o644))
+	for _, ea := range m.External {
+		d := filepath.Join(filepath.Dir(filepath.Dir(p)), "Attachments", strconv.FormatInt(rowid, 10), strconv.Itoa(ea.Part))
+		must(os.MkdirAll(d, 0o755))
+		must(os.WriteFile(filepath.Join(d, ea.Name), ea.Data, 0o644))
+	}
 	must(tx.Commit())
 	return rowid
 }

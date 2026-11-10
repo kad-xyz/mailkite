@@ -1,12 +1,16 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/kad-xyz/mailkite/internal/maildata"
 )
@@ -101,10 +105,19 @@ func domainOf(raw string) string {
 	return strings.TrimPrefix(u.Hostname(), "www.")
 }
 
+// maxNameBytes caps a saved file name.
+const maxNameBytes = 200
+
 // sanitizeName makes an attachment name safe to use as a file name.
 func sanitizeName(name string, index int) string {
+	name = strings.ToValidUTF8(name, "_")
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '_'
+		}
+		return r
+	}, name)
 	name = strings.ReplaceAll(name, "\\", "/")
-	name = strings.ReplaceAll(name, "\x00", "")
 	name = filepath.Base(strings.TrimSpace(name))
 	if name == "/" || name == "." {
 		name = ""
@@ -113,5 +126,73 @@ func sanitizeName(name string, index int) string {
 	if name == "" {
 		return "attachment-" + strconv.Itoa(index)
 	}
+	if len(name) > maxNameBytes {
+		ext := filepath.Ext(name)
+		if len(ext) > 20 {
+			ext = ""
+		}
+		stem := name[:len(name)-len(ext)]
+		cut := maxNameBytes - len(ext)
+		for cut > 0 && !utf8.RuneStart(stem[cut]) {
+			cut--
+		}
+		name = stem[:cut] + ext
+	}
 	return name
+}
+
+// resolveDir validates a user-supplied save directory: it must be absolute (after
+// ~ expansion), live inside $HOME once symlinks are resolved, and avoid ~/Library
+// and any dot-prefixed component.
+func resolveDir(dir string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", errors.New("cannot determine home directory")
+	}
+	rhome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return "", errors.New("cannot resolve home directory")
+	}
+	if dir == "~" {
+		dir = home
+	} else if strings.HasPrefix(dir, "~/") {
+		dir = filepath.Join(home, dir[2:])
+	}
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("dir must be an absolute path or start with ~/")
+	}
+	dir = filepath.Clean(dir)
+	// resolve symlinks of the deepest existing ancestor
+	existing, rest := dir, ""
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		rest = filepath.Join(filepath.Base(existing), rest)
+		existing = parent
+	}
+	real, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", errors.New("cannot resolve dir")
+	}
+	full := filepath.Join(real, rest)
+	rel, err := filepath.Rel(rhome, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return "", errors.New("dir must be inside your home directory")
+	}
+	if rel != "." {
+		for i, seg := range strings.Split(rel, string(filepath.Separator)) {
+			if strings.HasPrefix(seg, ".") {
+				return "", errors.New("dir must not be a hidden folder")
+			}
+			if i == 0 && seg == "Library" {
+				return "", errors.New("dir must not be inside ~/Library")
+			}
+		}
+	}
+	return full, nil
 }

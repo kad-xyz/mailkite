@@ -30,6 +30,7 @@ type loaded struct {
 	sm      maildata.Summary
 	raw     []byte // nil when the body is not on disk
 	partial bool
+	emlx    string // path of the .emlx file
 }
 
 func (h *handlers) load(ctx context.Context, id int64) (*loaded, error) {
@@ -46,7 +47,7 @@ func (h *handlers) load(ctx context.Context, id int64) (*loaded, error) {
 	}
 	l := &loaded{sm: sm}
 	if p, partial, ok := st.EmlxPath(id, mb); ok {
-		l.partial = partial
+		l.partial, l.emlx = partial, p
 		raw, err := message.ReadEmlx(p)
 		if err != nil {
 			return nil, fmt.Errorf("cannot read message %d: %w", id, err)

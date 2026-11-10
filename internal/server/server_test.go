@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kad-xyz/mailkite/internal/fts"
 	"github.com/kad-xyz/mailkite/internal/maildata"
@@ -28,7 +30,9 @@ func setup(t *testing.T) *env {
 	t.Helper()
 	f := testfixture.New(t)
 	f.AddAccount("A", "Work", "IMAP")
-	dl := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dl := filepath.Join(home, "Downloads")
 	return &env{f: f, cs: connect(t, func() (*maildata.Store, error) {
 		return maildata.Open(maildata.Options{MailRoot: f.Root, AccountsDB: f.AccountsDB})
 	}, dl), dl: dl}
@@ -143,7 +147,7 @@ func TestFindTool(t *testing.T) {
 func TestFindQueryRanks(t *testing.T) {
 	e := setup(t)
 	e.add("aaa", "kiwi")
-	b := e.add("bbb", "kiwi kiwi kiwi kiwi", func(m *testfixture.FixtureMsg) { m.Received = m.Received.Add(-time.Hour) })
+	b := e.add("bbb", "kiwi kiwi kiwi kiwi kiwi kiwi kiwi kiwi", func(m *testfixture.FixtureMsg) { m.Received = m.Received.Add(-time.Hour) })
 	e.add("ccc", "nothing")
 	out, isErr := e.call(t, "find", map[string]any{"query": "kiwi"})
 	if isErr {
@@ -152,7 +156,10 @@ func TestFindQueryRanks(t *testing.T) {
 	if strings.Contains(out, "ccc") || strings.Count(out, "\n") != 1 {
 		t.Fatalf("got %q", out)
 	}
-	_ = b
+	first := strings.SplitN(out, "\n", 2)[0]
+	if !strings.HasPrefix(first, fmt.Sprintf("%d |", b)) || !strings.Contains(first, "bbb") {
+		t.Fatalf("bbb (older, higher rank) must be first: %q", out)
+	}
 }
 
 func TestReadTool(t *testing.T) {
@@ -235,7 +242,7 @@ func TestSaveAttachmentNoOverwrite(t *testing.T) {
 		t.Fatalf("same path twice: %v", paths)
 	}
 	for _, p := range paths {
-		if filepath.Dir(p) != e.dl {
+		if rd, _ := filepath.EvalSymlinks(e.dl); filepath.Dir(p) != rd {
 			t.Errorf("escaped dir: %s", p)
 		}
 		b, err := os.ReadFile(p)
@@ -252,7 +259,11 @@ func TestSaveAttachmentNoOverwrite(t *testing.T) {
 }
 
 func TestSanitizeName(t *testing.T) {
-	for in, want := range map[string]string{"a/b/c.pdf": "c.pdf", "..\\x.txt": "x.txt", ".hidden": "hidden", "": "attachment-3", "..": "attachment-3", "/": "attachment-3"} {
+	long := strings.Repeat("é", 150) + ".pdf" // 304 bytes
+	if got := sanitizeName(long, 1); len(got) > 200 || !strings.HasSuffix(got, ".pdf") || !utf8.ValidString(got) {
+		t.Errorf("long name: %d bytes %q", len(got), got)
+	}
+	for in, want := range map[string]string{"a\nb.pdf": "a_b.pdf", "a/b/c.pdf": "c.pdf", "..\\x.txt": "x.txt", ".hidden": "hidden", "": "attachment-3", "..": "attachment-3", "/": "attachment-3"} {
 		if got := sanitizeName(in, 3); got != want {
 			t.Errorf("%q -> %q want %q", in, got, want)
 		}
@@ -297,5 +308,71 @@ func TestNoAccessIsToolError(t *testing.T) {
 	}
 	if opens != 2 {
 		t.Errorf("open retried %d times, want 2 (no cached failure)", opens)
+	}
+}
+
+func TestSaveAttachmentDirRestricted(t *testing.T) {
+	e := setup(t)
+	home := os.Getenv("HOME")
+	os.MkdirAll(filepath.Join(home, "Library"), 0o755)
+	os.Symlink(filepath.Join(home, "Library"), filepath.Join(home, "link"))
+	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\nContent-Disposition: attachment; filename=\"a.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+		base64.StdEncoding.EncodeToString([]byte("X")) + "\r\n--B--\r\n"
+	id := e.add("att", "", func(m *testfixture.FixtureMsg) { m.Raw = []byte(raw) })
+	for _, d := range []string{"rel/dir", "~", "~/Library/LaunchAgents", "~/.ssh", "/tmp/x", "~/link/x", "~/Downloads/.hid", "~/../other"} {
+		out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": d})
+		if d == "~" {
+			// the home directory itself is inside $HOME and allowed
+			if isErr {
+				t.Errorf("%q rejected: %s", d, out)
+			}
+			continue
+		}
+		if !isErr {
+			t.Errorf("dir %q accepted: %s", d, out)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents")); err == nil {
+		t.Error("LaunchAgents created")
+	}
+	if _, err := os.Stat(filepath.Join(home, "~")); err == nil {
+		t.Error("literal ~ dir created")
+	}
+	out, isErr := e.call(t, "save_attachment", map[string]any{"id": id, "dir": "~/Downloads/sub"})
+	if isErr || !strings.HasPrefix(out, filepath.Join(home, "Downloads", "sub")) && !strings.Contains(out, "Downloads/sub/a.pdf") {
+		t.Errorf("Downloads/sub: %v %q", isErr, out)
+	}
+	if fi, err := os.Stat(filepath.Join(home, "Downloads", "sub")); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Errorf("sub dir: %v %v", fi, err)
+	}
+}
+
+func TestSavePartialAttachments(t *testing.T) {
+	e := setup(t)
+	raw := "From: a@x.com\r\nSubject: att\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=B\r\n\r\n--B\r\nContent-Type: text/plain\r\n\r\nhi\r\n" +
+		"--B\r\nContent-Type: application/pdf; name=\"s.pdf\"\r\nContent-Disposition: attachment; filename=\"s.pdf\"\r\n\r\n\r\n" +
+		"--B\r\nContent-Type: application/pdf; name=\"s.pdf\"\r\nContent-Disposition: attachment; filename=\"s.pdf\"\r\n\r\n\r\n--B--\r\n"
+	id := e.add("att", "", func(m *testfixture.FixtureMsg) {
+		m.Raw, m.Partial = []byte(raw), true
+		m.External = []testfixture.ExternalAttachment{{Part: 3, Name: "s.pdf", Data: []byte("SECOND")}, {Part: 2, Name: "s.pdf", Data: []byte("FIRST")}}
+	})
+	out, isErr := e.call(t, "save_attachment", map[string]any{"id": id})
+	if isErr {
+		t.Fatal(out)
+	}
+	paths := strings.Split(out, "\n")
+	if len(paths) != 2 {
+		t.Fatalf("got %q", out)
+	}
+	for i, want := range []string{"FIRST", "SECOND"} {
+		if b, _ := os.ReadFile(paths[i]); string(b) != want {
+			t.Errorf("%s = %q want %q", paths[i], b, want)
+		}
+	}
+	// no external files: error
+	id2 := e.add("att2", "", func(m *testfixture.FixtureMsg) { m.Raw, m.Partial = []byte(raw), true })
+	out, isErr = e.call(t, "save_attachment", map[string]any{"id": id2})
+	if !isErr || !strings.Contains(out, "attachment not downloaded by Mail") {
+		t.Errorf("missing external: %v %q", isErr, out)
 	}
 }
