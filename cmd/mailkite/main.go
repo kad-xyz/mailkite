@@ -11,6 +11,7 @@ import (
 
 	"github.com/kad-xyz/mailkite/internal/config"
 	"github.com/kad-xyz/mailkite/internal/fts"
+	"github.com/kad-xyz/mailkite/internal/imapx"
 	"github.com/kad-xyz/mailkite/internal/maildata"
 	"github.com/kad-xyz/mailkite/internal/secret"
 	"github.com/kad-xyz/mailkite/internal/server"
@@ -64,8 +65,7 @@ func run(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		verify := func(context.Context, config.Account, string) error { return nil } // real IMAP check: Task 2
-		return runSetup(ctx, os.Stdin, os.Stdout, st.Accounts, secret.Keychain{}, verify, cfgPath)
+		return runSetup(ctx, os.Stdin, os.Stdout, st.Accounts, secret.Keychain{}, imapx.Verify, cfgPath)
 	case args[0] == "index":
 		st, err := openStore()
 		if err != nil {
