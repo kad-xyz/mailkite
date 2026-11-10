@@ -297,3 +297,22 @@ func synthesize(m FixtureMsg) []byte {
 	b.WriteString("Fixture body for " + m.Subject + "\r\n")
 	return []byte(b.String())
 }
+
+// RemoveMessage deletes the message rows and its .emlx file.
+func (f *Fixture) RemoveMessage(rowid int64) {
+	f.t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var u string
+	if err := f.idx.QueryRow("SELECT b.url FROM messages m JOIN mailboxes b ON b.ROWID = m.mailbox WHERE m.ROWID=?", rowid).Scan(&u); err != nil {
+		f.t.Fatal(err)
+	}
+	for _, q := range []string{"DELETE FROM recipients WHERE message=?", "DELETE FROM attachments WHERE message=?", "DELETE FROM messages WHERE ROWID=?"} {
+		if _, err := f.idx.Exec(q, rowid); err != nil {
+			f.t.Fatal(err)
+		}
+	}
+	for _, partial := range []bool{false, true} {
+		os.Remove(f.emlxPath(u, rowid, partial))
+	}
+}
