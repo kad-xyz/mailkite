@@ -97,7 +97,13 @@ func build(st *lazy[*maildata.Store], ix *lazy[*fts.Index], opts Options) (*mcp.
 		}
 	}
 	h := &handlers{store: st, index: ix, opts: opts, plans: &safety.Plans{}}
-	h.state = &lazy[*safety.State]{open: func() (*safety.State, error) { return safety.OpenState(h.stateDir()) }}
+	h.state = &lazy[*safety.State]{open: func() (*safety.State, error) {
+		dir, err := h.stateDir()
+		if err != nil {
+			return nil, err
+		}
+		return safety.OpenState(dir)
+	}}
 	version := opts.Version
 	if version == "" {
 		version = "dev"

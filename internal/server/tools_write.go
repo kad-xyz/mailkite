@@ -54,15 +54,17 @@ func (e *erasePlans) take(id string) bool {
 	return ok
 }
 
-func (h *handlers) stateDir() string {
+// stateDir is Options.StateDir or ~/Library/Application Support/mailkite. Without
+// a home directory it is an error: nothing is ever written relative to the cwd.
+func (h *handlers) stateDir() (string, error) {
 	if h.opts.StateDir != "" {
-		return h.opts.StateDir
+		return h.opts.StateDir, nil
 	}
 	d, err := safety.DefaultRoot()
 	if err != nil {
-		return filepath.Join(".", ".mailkite")
+		return "", fmt.Errorf("no state directory: %w", err)
 	}
-	return d
+	return d, nil
 }
 
 // hiddenFilter returns a Filter.Skip that hides messages mailkite erased but Mail's
@@ -119,6 +121,10 @@ func (h *handlers) engine() (*actions.Engine, error) {
 	if h.opts.Engine != nil {
 		return h.opts.Engine(st, state)
 	}
+	dir, err := h.stateDir()
+	if err != nil {
+		return nil, err
+	}
 	path, err := config.Path()
 	if err != nil {
 		return nil, err
@@ -129,7 +135,7 @@ func (h *handlers) engine() (*actions.Engine, error) {
 	}
 	return &actions.Engine{
 		Store: st, Cfg: cfg, Secrets: secret.Keychain{}, Plans: h.plans, Confirm: safety.OSAScript{},
-		Archive: &safety.Archive{Dir: filepath.Join(h.stateDir(), "archive")}, State: state,
+		Archive: &safety.Archive{Dir: filepath.Join(dir, "archive")}, State: state,
 		POP: actions.AppleScriptPOP{}, Version: h.opts.Version,
 	}, nil
 }

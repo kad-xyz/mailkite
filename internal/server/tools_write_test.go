@@ -19,7 +19,6 @@ import (
 	"github.com/kad-xyz/mailkite/internal/maildata"
 	"github.com/kad-xyz/mailkite/internal/safety"
 	"github.com/kad-xyz/mailkite/internal/testfixture"
-	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const bulkHdr = "List-Id: <news.shop.example>\r\nList-Unsubscribe: <https://shop.example/u>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\nPrecedence: bulk\r\n"
@@ -388,4 +387,14 @@ func TestReadFetchesMissingBodyOverIMAP(t *testing.T) {
 	}
 }
 
-var _ = mcp.ToolAnnotations{}
+func TestStateDirNeedsHome(t *testing.T) {
+	t.Setenv("HOME", "")
+	h := &handlers{}
+	if d, err := h.stateDir(); err == nil {
+		t.Fatalf("no HOME must be an error, got %q", d)
+	}
+	h.opts.StateDir = t.TempDir()
+	if d, err := h.stateDir(); err != nil || d != h.opts.StateDir {
+		t.Fatalf("explicit dir: %q %v", d, err)
+	}
+}
