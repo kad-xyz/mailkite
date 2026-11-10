@@ -72,6 +72,13 @@ func (f Filter) limit() int {
 	return f.Limit
 }
 
+func (f Filter) offset() int {
+	if f.Offset < 0 {
+		return 0
+	}
+	return f.Offset
+}
+
 // accountNames returns UUID -> resolved account name, cached until the Accounts db changes.
 func (s *Store) accountNames() map[string]string {
 	s.accMu.Lock()
@@ -85,31 +92,43 @@ func (s *Store) accountNames() map[string]string {
 	if s.accNames != nil && stamp == s.accStamp {
 		return s.accNames
 	}
-	names := map[string]string{}
-	if db, err := openReadOnly(s.accountsDB); err == nil {
-		defer db.Close()
-		rows, err := db.Query(`SELECT a.ZIDENTIFIER, a.ZACCOUNTDESCRIPTION, a.ZUSERNAME, p.ZACCOUNTDESCRIPTION, p.ZUSERNAME, t.ZACCOUNTTYPEDESCRIPTION
-			FROM ZACCOUNT a LEFT JOIN ZACCOUNT p ON p.Z_PK = a.ZPARENTACCOUNT
-			LEFT JOIN ZACCOUNTTYPE t ON t.Z_PK = a.ZACCOUNTTYPE WHERE a.ZIDENTIFIER IS NOT NULL`)
-		if err == nil {
-			defer rows.Close()
-			for rows.Next() {
-				var id string
-				var c [5]sql.NullString
-				if rows.Scan(&id, &c[0], &c[1], &c[2], &c[3], &c[4]) != nil {
-					continue
-				}
-				for _, v := range c { // own desc, own user, parent desc, parent user, type
-					if v.Valid && strings.TrimSpace(v.String) != "" {
-						names[id] = v.String
-						break
-					}
-				}
-			}
-		}
+	names, err := s.loadAccountNames()
+	if err != nil {
+		// Do not cache a failure: fall back to UUIDs for this call and retry next time.
+		return map[string]string{}
 	}
 	s.accNames, s.accStamp = names, stamp
 	return names
+}
+
+func (s *Store) loadAccountNames() (map[string]string, error) {
+	db, err := openReadOnly(s.accountsDB)
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT a.ZIDENTIFIER, a.ZACCOUNTDESCRIPTION, a.ZUSERNAME, p.ZACCOUNTDESCRIPTION, p.ZUSERNAME, t.ZACCOUNTTYPEDESCRIPTION
+		FROM ZACCOUNT a LEFT JOIN ZACCOUNT p ON p.Z_PK = a.ZPARENTACCOUNT
+		LEFT JOIN ZACCOUNTTYPE t ON t.Z_PK = a.ZACCOUNTTYPE WHERE a.ZIDENTIFIER IS NOT NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	names := map[string]string{}
+	for rows.Next() {
+		var id string
+		var c [5]sql.NullString
+		if err := rows.Scan(&id, &c[0], &c[1], &c[2], &c[3], &c[4]); err != nil {
+			return nil, err
+		}
+		for _, v := range c { // own desc, own user, parent desc, parent user, type
+			if v.Valid && strings.TrimSpace(v.String) != "" {
+				names[id] = v.String
+				break
+			}
+		}
+	}
+	return names, rows.Err()
 }
 
 func (s *Store) loadMailboxes(ctx context.Context) ([]Mailbox, error) {
@@ -201,7 +220,7 @@ func likeEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
-const selectSummary = `SELECT m.ROWID, coalesce(g.message_id_header,''), m.date_received, coalesce(a.address,''), coalesce(a.comment,''),
+const selectSummary = `SELECT m.ROWID, coalesce(g.message_id_header,''), coalesce(m.date_received,0), coalesce(a.address,''), coalesce(a.comment,''),
 	coalesce(s.subject,''), m.mailbox, m.read, m.flagged, coalesce(m.size,0),
 	(SELECT count(*) FROM attachments t WHERE t.message = m.ROWID), m.list_id_hash IS NOT NULL, coalesce(m.unsubscribe_type,0)
 FROM messages m
@@ -342,7 +361,7 @@ func dedupKey(sm Summary) string {
 
 // Find returns one page of messages, newest first, and whether more exist.
 func (s *Store) Find(ctx context.Context, f Filter) (items []Summary, more bool, err error) {
-	need := f.Offset + f.limit() + 1
+	need := f.offset() + f.limit() + 1
 	type entry struct {
 		sm    Summary
 		isAll bool
@@ -367,16 +386,16 @@ func (s *Store) Find(ctx context.Context, f Filter) (items []Summary, more bool,
 	if err != nil {
 		return nil, false, err
 	}
-	if f.Offset >= len(uniq) {
+	if f.offset() >= len(uniq) {
 		return nil, false, nil
 	}
-	end := f.Offset + f.limit()
+	end := f.offset() + f.limit()
 	if end < len(uniq) {
 		more = true
 	} else {
 		end = len(uniq)
 	}
-	for _, e := range uniq[f.Offset:end] {
+	for _, e := range uniq[f.offset():end] {
 		items = append(items, e.sm)
 	}
 	return items, more, nil

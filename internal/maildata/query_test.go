@@ -50,11 +50,17 @@ func TestFindDefaultOrderAndLimit(t *testing.T) {
 	if items[0].Account != "Home" || items[0].Mailbox != "INBOX" {
 		t.Errorf("account/mailbox: %q %q", items[0].Account, items[0].Mailbox)
 	}
-	items, more, _ = s.Find(ctx, Filter{Limit: 2, Offset: 4})
+	items, more, err = s.Find(ctx, Filter{Limit: 2, Offset: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(items) != 2 || more {
 		t.Errorf("offset page: %d more=%v", len(items), more)
 	}
-	items, _, _ = s.Find(ctx, Filter{Account: "work"})
+	items, _, err = s.Find(ctx, Filter{Account: "work"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(items) != 3 {
 		t.Errorf("account by name: %d", len(items))
 	}
@@ -80,11 +86,17 @@ func TestFindExcludesTrashAndDeleted(t *testing.T) {
 	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", Subject: "flagged deleted", Deleted: true})
 	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", Subject: "ok"})
 	s := openFix(t, f)
-	items, _, _ := s.Find(ctx, Filter{})
+	items, _, err := s.Find(ctx, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(items) != 1 || items[0].Subject != "ok" {
 		t.Fatalf("default: %+v", items)
 	}
-	items, _, _ = s.Find(ctx, Filter{Role: RoleTrash})
+	items, _, err = s.Find(ctx, Filter{Role: RoleTrash})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(items) != 1 || items[0].Subject != "in trash" {
 		t.Fatalf("trash: %+v", items)
 	}
@@ -116,7 +128,10 @@ func TestFindFilters(t *testing.T) {
 	check("since", Filter{Since: tm(3)}, "hello")
 	check("until", Filter{Until: tm(3)}, "Выписка из реестра")
 	check("mailbox", Filter{Mailbox: "inbox", From: "bob"}, "hello")
-	items, _, _ := s.Find(ctx, Filter{})
+	items, _, err := s.Find(ctx, Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	check("ids", Filter{IDs: []int64{items[1].ID}}, items[1].Subject)
 }
 
@@ -137,7 +152,10 @@ func TestSenders(t *testing.T) {
 	if g[1].Address != "b@x.com" || g[1].Count != 1 || g[1].ListID {
 		t.Errorf("%+v", g[1])
 	}
-	g, _ = s.Senders(ctx, Filter{}, 2)
+	g, err = s.Senders(ctx, Filter{}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(g) != 1 || g[0].Address != "a@news.com" {
 		t.Errorf("minCount: %+v", g)
 	}
@@ -180,5 +198,61 @@ func TestAccountsNames(t *testing.T) {
 	}
 	if c := got["C1"]; c.Messages != 2 || c.Unread != 1 || c.Kind != "imap" || len(c.Mailboxes) != 2 {
 		t.Errorf("counts: %+v", c)
+	}
+}
+
+func TestFindNegativeOffset(t *testing.T) {
+	f := testfixture.New(t)
+	for i := 0; i < 3; i++ {
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", Subject: "s", Received: tm(i)})
+	}
+	s := openFix(t, f)
+	items, more, err := s.Find(ctx, Filter{Offset: -1, Limit: 2})
+	if err != nil || len(items) != 2 || !more || !items[0].Date.Equal(tm(2)) {
+		t.Fatalf("%+v more=%v err=%v", items, more, err)
+	}
+}
+
+func TestFindOffsetWithDedup(t *testing.T) {
+	f := testfixture.New(t)
+	for i := 0; i < 4; i++ {
+		id := "<m" + string(rune('a'+i)) + "@x>"
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://G/%5BGmail%5D/All%20Mail", MessageID: id, Subject: id, Received: tm(i)})
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://G/INBOX", MessageID: id, Subject: id, Received: tm(i)})
+	}
+	s := openFix(t, f)
+	items, more, err := s.Find(ctx, Filter{Offset: 1, Limit: 2})
+	if err != nil || len(items) != 2 || !more {
+		t.Fatalf("%+v more=%v err=%v", items, more, err)
+	}
+	if items[0].MessageID != "<mc@x>" || items[1].MessageID != "<mb@x>" || items[0].Mailbox != "INBOX" {
+		t.Errorf("%+v", items)
+	}
+	items, more, err = s.Find(ctx, Filter{Offset: 3, Limit: 2})
+	if err != nil || len(items) != 1 || more || items[0].MessageID != "<ma@x>" {
+		t.Errorf("%+v more=%v err=%v", items, more, err)
+	}
+}
+
+func TestFindLimitCap(t *testing.T) {
+	f := testfixture.New(t)
+	for i := 0; i < 205; i++ {
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", Subject: "s", Received: tm(i)})
+	}
+	s := openFix(t, f)
+	items, more, err := s.Find(ctx, Filter{Limit: 1000})
+	if err != nil || len(items) != 200 || !more {
+		t.Fatalf("len=%d more=%v err=%v", len(items), more, err)
+	}
+}
+
+func TestFindLikeEscape(t *testing.T) {
+	f := testfixture.New(t)
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", Subject: "50% off"})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", Subject: "500 off"})
+	s := openFix(t, f)
+	items, _, err := s.Find(ctx, Filter{Subject: "0% o"})
+	if err != nil || len(items) != 1 || items[0].Subject != "50% off" {
+		t.Fatalf("%+v err=%v", items, err)
 	}
 }
