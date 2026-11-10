@@ -38,6 +38,8 @@ type Message struct {
 	Parts                            []Part
 	ListUnsubscribe                  string
 	ListUnsubscribePost              string
+	Precedence                       string // raw Precedence header (bulk, list, junk...)
+	ListID                           string // raw List-Id header
 
 	html string
 	doc  *html.Node // parsed html, kept when the text came from it
@@ -204,6 +206,8 @@ func Parse(raw []byte) (*Message, error) {
 		Cc:                  fmtAddrs(h, "Cc"),
 		ListUnsubscribe:     strings.TrimSpace(h.Get("List-Unsubscribe")),
 		ListUnsubscribePost: strings.TrimSpace(h.Get("List-Unsubscribe-Post")),
+		Precedence:          strings.TrimSpace(h.Get("Precedence")),
+		ListID:              strings.TrimSpace(decodeWord(h.Get("List-Id"))),
 	}
 	mh := mail.Header{Header: h}
 	if s, err := mh.Subject(); err == nil {

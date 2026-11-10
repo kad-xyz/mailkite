@@ -193,3 +193,10 @@ func TestPartDataReportsCorruptBody(t *testing.T) {
 		t.Errorf("corrupt part returned without error: %q", data)
 	}
 }
+
+func TestPrecedenceAndListIDHeaders(t *testing.T) {
+	m, _ := Parse([]byte("Precedence:  Bulk \r\nList-Id: Shop news <news.shop.example>\r\n\r\nbody"))
+	if m.Precedence != "Bulk" || m.ListID != "Shop news <news.shop.example>" {
+		t.Fatalf("%q %q", m.Precedence, m.ListID)
+	}
+}

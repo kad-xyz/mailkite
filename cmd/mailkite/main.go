@@ -66,6 +66,19 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		return runSetup(ctx, os.Stdin, os.Stdout, st.Accounts, secret.Keychain{}, imapx.Verify, cfgPath)
+	case args[0] == "restore":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: mailkite restore <file.eml|archive day directory>")
+		}
+		cfgPath, err := config.Path()
+		if err != nil {
+			return err
+		}
+		cfg, err := config.Load(cfgPath)
+		if err != nil {
+			return err
+		}
+		return runRestore(ctx, realRestoreDeps(cfg, os.Stdout), args[1])
 	case args[0] == "index":
 		st, err := openStore()
 		if err != nil {
@@ -87,7 +100,7 @@ func run(ctx context.Context, args []string) error {
 		fmt.Printf("indexed %d docs\n", n)
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, "usage: mailkite [version|index|setup]")
+	fmt.Fprintln(os.Stderr, "usage: mailkite [version|index|setup|restore <path>]")
 	os.Exit(2)
 	return nil
 }
