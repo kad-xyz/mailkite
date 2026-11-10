@@ -115,10 +115,21 @@ func (f *Fixture) AddAccount(uuid, desc, typ string) {
 
 // AddMessage writes the message rows and its .emlx file and returns the message ROWID.
 // It is safe for concurrent use.
-func (f *Fixture) AddMessage(m FixtureMsg) int64 {
+func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
 	f.t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	// Report failures with t.Error (valid from any goroutine) instead of t.Fatal.
+	defer func() {
+		if r := recover(); r != nil {
+			e, ok := r.(abortErr)
+			if !ok {
+				panic(r)
+			}
+			f.t.Error(e.error)
+			rowid = 0
+		}
+	}()
 
 	if m.MessageID == "" {
 		m.MessageID = fmt.Sprintf("<fixture-%d@example.com>", f.seq.Add(1))
@@ -133,12 +144,12 @@ func (f *Fixture) AddMessage(m FixtureMsg) int64 {
 
 	tx, err := f.idx.Begin()
 	if err != nil {
-		f.t.Fatal(err)
+		abort(err)
 	}
 	defer tx.Rollback()
 	must := func(err error) {
 		if err != nil {
-			f.t.Fatal(err)
+			abort(err)
 		}
 	}
 	lookup := func(sel, ins string, args ...any) int64 {
@@ -148,7 +159,7 @@ func (f *Fixture) AddMessage(m FixtureMsg) int64 {
 			return id
 		}
 		if err != sql.ErrNoRows {
-			f.t.Fatal(err)
+			abort(err)
 		}
 		res, err := tx.Exec(ins, args...)
 		must(err)
@@ -193,7 +204,7 @@ func (f *Fixture) AddMessage(m FixtureMsg) int64 {
 		VALUES(?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,0,?,?)`,
 		gid, gid, 0, sender, "", subj, sum, ts, ts, mbox, b2i(m.Read), b2i(m.Flagged), b2i(m.Deleted), len(m.Raw), listHash, m.UnsubType)
 	must(err)
-	rowid, _ := res.LastInsertId()
+	rowid, _ = res.LastInsertId()
 	_, err = tx.Exec("UPDATE message_global_data SET message_id=? WHERE ROWID=?", rowid, gid)
 	must(err)
 
@@ -217,11 +228,15 @@ func (f *Fixture) AddMessage(m FixtureMsg) int64 {
 	return rowid
 }
 
+type abortErr struct{ error }
+
+func abort(err error) { panic(abortErr{err}) }
+
 // emlxPath applies the Mail storage layout rule for a message file.
 func (f *Fixture) emlxPath(mailboxURL string, rowid int64, partial bool) string {
 	u, err := url.Parse(mailboxURL)
 	if err != nil {
-		f.t.Fatal(err)
+		abort(err)
 	}
 	parts := []string{"V10", u.Host}
 	var segs []string
@@ -231,7 +246,7 @@ func (f *Fixture) emlxPath(mailboxURL string, rowid int64, partial bool) string 
 		}
 		d, err := url.PathUnescape(s)
 		if err != nil {
-			f.t.Fatal(err)
+			abort(err)
 		}
 		segs = append(segs, d+".mbox")
 	}
