@@ -90,8 +90,8 @@ func TestSyncPrune(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.RemoveMessage(id)
-	if _, r, _ := ix.Sync(ctx, st); r != 0 {
-		t.Fatalf("pruned too early: %d", r)
+	if _, r, err := ix.Sync(ctx, st); err != nil || r != 0 {
+		t.Fatalf("pruned too early: %d %v", r, err)
 	}
 	old := time.Now().Add(-2 * time.Minute).Unix()
 	if _, err := ix.db.Exec("INSERT OR REPLACE INTO meta(key,value) VALUES('last_prune',?)", old); err != nil {
@@ -219,6 +219,7 @@ func TestMissingEmlxRetried(t *testing.T) {
 	if err := os.WriteFile(p, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	agePending(t, ix)
 	if a, _ := mustSync(t, ix, st); a != 0 {
 		t.Errorf("added=%d", a)
 	}
@@ -235,6 +236,7 @@ func TestPendingDroppedOnPrune(t *testing.T) {
 	id := f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "p", Partial: true})
 	mustSync(t, ix, st)
 	f.RemoveMessage(id)
+	agePending(t, ix)
 	mustSync(t, ix, st) // retry sees ErrNotFound
 	if pendingCount(t, ix) != 0 {
 		t.Errorf("pending not dropped")
@@ -288,5 +290,35 @@ func TestIndexFilePermissions(t *testing.T) {
 		if fi, err := os.Stat(p); err != nil || fi.Mode().Perm() != want {
 			t.Errorf("%s: %v %v", p, fi, err)
 		}
+	}
+}
+
+func TestPendingRetryRotates(t *testing.T) {
+	f, st, ix := setup(t)
+	oldBatch := pendingBatch
+	defer func() { pendingBatch = oldBatch }()
+	pendingBatch = 2
+	for i := 0; i < 3; i++ {
+		f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://A/INBOX", From: "a@x.com", Subject: "p", Partial: true})
+	}
+	late := add(f, "late", "rotateword")
+	sm, mb, _ := st.Get(ctx, late)
+	p, _, _ := st.EmlxPath(sm.ID, mb)
+	data, _ := os.ReadFile(p)
+	os.Remove(p)
+	mustSync(t, ix, st) // retries the first two, stamps them
+	if err := os.WriteFile(p, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSync(t, ix, st) // must reach the untried rows, including the late one
+	if got := search(t, ix, "rotateword"); !slices.Equal(got, []int64{late}) {
+		t.Errorf("late body starved: %v", got)
+	}
+}
+
+func agePending(t *testing.T, ix *Index) {
+	t.Helper()
+	if _, err := ix.db.Exec("UPDATE pending SET retried_at=0"); err != nil {
+		t.Fatal(err)
 	}
 }

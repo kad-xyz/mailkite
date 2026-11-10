@@ -24,11 +24,14 @@ const (
 	pruneEvery   = 60 * time.Second
 	maxBodyBytes = 256 << 10
 	defaultLimit = 500
-	pendingBatch = 200
+	retryAfter   = 600 // seconds between body retries of one message
 )
 
 // chunkSize is how many messages one Sync transaction covers; variables so tests can shrink them.
 var chunkSize = 500
+
+// pendingBatch caps the body retries per Sync.
+var pendingBatch = 200
 
 // afterChunk is a test hook called after each committed chunk.
 var afterChunk func()
@@ -67,13 +70,16 @@ func Open(path string) (*Index, error) {
 	db.SetMaxOpenConns(1)
 	_, err = db.Exec(`CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(subject, sender, recipients, body, attachments, tokenize='unicode61 remove_diacritics 2');
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value);
-CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY);`)
+CREATE TABLE IF NOT EXISTS pending(rowid INTEGER PRIMARY KEY, retried_at INTEGER NOT NULL DEFAULT 0);`)
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("init index: %w", err)
 	}
-	for _, suf := range []string{"", "-wal", "-shm"} {
-		os.Chmod(path+suf, 0o600) // the index holds mail text
+	for _, suf := range []string{"", "-wal", "-shm"} { // the index holds mail text
+		if err := os.Chmod(path+suf, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			return nil, err
+		}
 	}
 	return &Index{db: db}, nil
 }
@@ -152,7 +158,7 @@ func (ix *Index) Sync(ctx context.Context, st *maildata.Store) (added, removed i
 		if err != nil {
 			return nil, nil, err
 		}
-		pend, err := tx.PrepareContext(ctx, "INSERT OR IGNORE INTO pending(rowid) VALUES(?)")
+		pend, err := tx.PrepareContext(ctx, "INSERT OR IGNORE INTO pending(rowid, retried_at) VALUES(?, 0)")
 		if err != nil {
 			ins.Close()
 			return nil, nil, err
@@ -243,7 +249,8 @@ func (ix *Index) Sync(ctx context.Context, st *maildata.Store) (added, removed i
 
 // retryPending re-reads up to pendingBatch messages that were indexed without a full body.
 func (ix *Index) retryPending(ctx context.Context, tx *sql.Tx, st *maildata.Store) error {
-	rows, err := tx.QueryContext(ctx, "SELECT rowid FROM pending ORDER BY rowid LIMIT ?", pendingBatch)
+	now := time.Now().Unix()
+	rows, err := tx.QueryContext(ctx, "SELECT rowid FROM pending WHERE retried_at < ? ORDER BY retried_at, rowid LIMIT ?", now-retryAfter, pendingBatch)
 	if err != nil {
 		return err
 	}
@@ -273,6 +280,9 @@ func (ix *Index) retryPending(ctx context.Context, tx *sql.Tx, st *maildata.Stor
 		}
 		body, _, full := bodyOf(st, id, mb)
 		if !full {
+			if _, err := tx.ExecContext(ctx, "UPDATE pending SET retried_at=? WHERE rowid=?", now, id); err != nil {
+				return err
+			}
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, "UPDATE docs SET body=? WHERE rowid=?", norm(body), id); err != nil {
