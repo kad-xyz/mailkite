@@ -113,6 +113,19 @@ func (f *Fixture) AddAccount(uuid, desc, typ string) {
 	}
 }
 
+// AddChildAccount registers a Mail-style child account: empty description,
+// NULL username, and a parent (added earlier with AddAccount) that carries the name.
+func (f *Fixture) AddChildAccount(uuid, parentUUID, typ string) {
+	f.t.Helper()
+	f.AddAccount(uuid, "", typ)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.acc.Exec(`UPDATE ZACCOUNT SET ZUSERNAME=NULL,
+		ZPARENTACCOUNT=(SELECT Z_PK FROM ZACCOUNT WHERE ZIDENTIFIER=?) WHERE ZIDENTIFIER=?`, parentUUID, uuid); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
 // AddMessage writes the message rows and its .emlx file and returns the message ROWID.
 // It is safe for concurrent use.
 func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
@@ -195,7 +208,7 @@ func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
 		}
 		return 0
 	}
-	var listHash int64
+	var listHash any // NULL when the message has no List-Id, like a real index
 	if m.ListID {
 		listHash = 1234567
 	}

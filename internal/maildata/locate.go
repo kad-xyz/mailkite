@@ -38,6 +38,10 @@ type Store struct {
 	mu        sync.Mutex
 	walkedDir map[string]bool
 	walkCache map[string]map[int64]walked // mailbox dir -> rowid -> file
+
+	accMu    sync.Mutex
+	accNames map[string]string // account UUID -> resolved name
+	accStamp string            // fingerprint of the Accounts db files at load time
 }
 
 var versionRe = regexp.MustCompile(`^V(\d+)$`)
