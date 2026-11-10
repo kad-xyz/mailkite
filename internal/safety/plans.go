@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,8 +17,9 @@ import (
 const PlanTTL = 10 * time.Minute
 
 var (
-	ErrPlanUnknown = errors.New("plan not found or already used; make a new preview")
-	ErrPlanExpired = errors.New("plan expired (older than 10 minutes); make a new preview")
+	ErrPlanMismatch = errors.New("plan does not match its targets; make a new preview")
+	ErrPlanUnknown  = errors.New("plan not found or already used; make a new preview")
+	ErrPlanExpired  = errors.New("plan expired (older than 10 minutes); make a new preview")
 )
 
 // Target is one message a plan acts on.
@@ -52,11 +55,12 @@ func newID() string {
 }
 
 // New stores p under a fresh random ID and returns it. Created defaults to now.
-// Plans expired relative to p.Created are dropped here, so memory stays bounded
-// without timers.
+// Plans older than PlanTTL by the wall clock are dropped here, so memory stays
+// bounded without timers.
 func (ps *Plans) New(p Plan) string {
+	now := time.Now()
 	if p.Created.IsZero() {
-		p.Created = time.Now()
+		p.Created = now
 	}
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
@@ -64,7 +68,7 @@ func (ps *Plans) New(p Plan) string {
 		ps.m = map[string]Plan{}
 	}
 	for id, old := range ps.m {
-		if p.Created.Sub(old.Created) > PlanTTL {
+		if now.Sub(old.Created) > PlanTTL {
 			delete(ps.m, id)
 		}
 	}
@@ -109,4 +113,49 @@ func PlanHash(action string, messageIDs []string) string {
 		put(id)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// targetIDs returns every Message-ID of targets; an empty one is an error, since a
+// plan must name exactly the messages it acts on.
+func targetIDs(targets map[string][]Target) ([]string, error) {
+	var ids []string
+	for acc, ts := range targets {
+		for _, t := range ts {
+			if strings.TrimSpace(t.MessageID) == "" {
+				return nil, fmt.Errorf("plan: account %s: target %d has no Message-ID", acc, t.ID)
+			}
+			ids = append(ids, t.MessageID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("plan: no targets")
+	}
+	return ids, nil
+}
+
+// NewPlanFor builds a plan bound to its targets: Hash is PlanHash of the action and
+// all targets' Message-IDs. Targets without a Message-ID are refused.
+func NewPlanFor(action string, targets map[string][]Target, summary, button string, extra any, now time.Time) (Plan, error) {
+	ids, err := targetIDs(targets)
+	if err != nil {
+		return Plan{}, err
+	}
+	return Plan{Action: action, Account: targets, Hash: PlanHash(action, ids), Created: now,
+		Summary: summary, Button: button, Extra: extra}, nil
+}
+
+// Verify recomputes the hash for action and targets and fails unless it equals the
+// plan's, so a plan can only run the action on the messages it was made for.
+func (p Plan) Verify(action string, targets map[string][]Target) error {
+	if action != p.Action {
+		return ErrPlanMismatch
+	}
+	ids, err := targetIDs(targets)
+	if err != nil {
+		return err
+	}
+	if p.Hash == "" || PlanHash(action, ids) != p.Hash {
+		return ErrPlanMismatch
+	}
+	return nil
 }

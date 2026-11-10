@@ -76,3 +76,21 @@ func TestStateHideLog(t *testing.T) {
 		t.Fatalf("line %v", l)
 	}
 }
+
+func TestStatePathWithSpace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "Application Support", "mail kite")
+	st, err := OpenState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Hide([]string{"a@x"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if h, err := st.Hidden(context.Background()); err != nil || len(h) != 1 {
+		t.Fatalf("%v %v", h, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+}

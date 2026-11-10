@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/kad-xyz/mailkite/internal/maildata"
 )
@@ -22,6 +23,7 @@ const (
 	dayLayout       = "2006-01-02"
 	maxSubjectRunes = 60
 	maxNameTries    = 1000
+	maxNameBytes    = 200 // whole file name: id, subject, -N suffix and extension
 )
 
 // DefaultRoot returns ~/Library/Application Support/mailkite, the directory for the
@@ -35,6 +37,7 @@ func DefaultRoot() (string, error) {
 }
 
 // Archive keeps raw copies of messages before they are erased, one directory per day.
+// Dir is <root>/archive (see DefaultRoot); Save makes both Dir and root 0700.
 type Archive struct{ Dir string }
 
 // Sidecar is the .json file stored next to every archived .eml.
@@ -42,11 +45,16 @@ type Sidecar struct {
 	Account   string `json:"account"` // Mail account UUID
 	Mailbox   string `json:"mailbox"`
 	MessageID string `json:"message_id"`
-	Date      string `json:"date"` // message date, RFC 3339
+	Date      string `json:"date"` // message date, RFC 3339; "" when unknown
 }
 
-// mkdirPrivate creates dir (and parents) and forces 0700 on dir itself.
+// mkdirPrivate creates dir (and missing parents, 0700) and forces 0700 on dir
+// itself, also when it already existed with a wider mode.
 func mkdirPrivate(dir string) error {
+	dir = filepath.Clean(dir)
+	if home, err := os.UserHomeDir(); err == nil && (dir == filepath.Clean(home) || dir == "/") {
+		return fmt.Errorf("refusing to change permissions of %s", dir)
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -73,6 +81,17 @@ func safeName(subject string) string {
 	return s
 }
 
+// cutBytes shortens s to at most n bytes without splitting a rune.
+func cutBytes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 func writeNew(path string, data []byte) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -91,10 +110,12 @@ func writeNew(path string, data []byte) error {
 	return err
 }
 
-// Save writes raw to Dir/YYYY-MM-DD/<id>-<subject>.eml (day of date, the archiving
-// time) with a .json sidecar, both 0600 and fsynced. Existing files are never
-// overwritten: a -2, -3, ... suffix is added instead. mailbox is the mailbox the
-// message is restored to. It returns the .eml path.
+// Save writes raw to Dir/YYYY-MM-DD/<id>-<subject>.eml with a .json sidecar, both
+// 0600 and fsynced. date is the archive time (pass now), NOT the message date: it
+// names the day directory that Prune ages out; the message date comes from s.Date.
+// Existing files are never overwritten: a -2, -3, ... suffix is added instead, and
+// file names stay within 200 bytes. mailbox is the mailbox the message is restored
+// to. It returns the .eml path.
 func (a Archive) Save(date time.Time, s maildata.Summary, mailbox string, raw []byte) (string, error) {
 	if a.Dir == "" {
 		return "", errors.New("archive: empty directory")
@@ -103,26 +124,30 @@ func (a Archive) Save(date time.Time, s maildata.Summary, mailbox string, raw []
 		return "", errors.New("archive: empty message")
 	}
 	day := filepath.Join(a.Dir, date.Format(dayLayout))
+	if err := mkdirPrivate(filepath.Dir(a.Dir)); err != nil { // the mailkite root
+		return "", err
+	}
 	if err := mkdirPrivate(a.Dir); err != nil {
 		return "", err
 	}
 	if err := mkdirPrivate(day); err != nil {
 		return "", err
 	}
-	msgDate := s.Date
-	if msgDate.IsZero() {
-		msgDate = date
+	msgDate := ""
+	if !s.Date.IsZero() {
+		msgDate = s.Date.Format(time.RFC3339)
 	}
-	meta, err := json.Marshal(Sidecar{Account: s.Account, Mailbox: mailbox, MessageID: s.MessageID, Date: msgDate.Format(time.RFC3339)})
+	meta, err := json.Marshal(Sidecar{Account: s.Account, Mailbox: mailbox, MessageID: s.MessageID, Date: msgDate})
 	if err != nil {
 		return "", err
 	}
 	base := strconv.FormatInt(s.ID, 10) + "-" + safeName(s.Subject)
 	for i := 1; i <= maxNameTries; i++ {
-		name := base
+		suffix := ""
 		if i > 1 {
-			name += "-" + strconv.Itoa(i)
+			suffix = "-" + strconv.Itoa(i)
 		}
+		name := cutBytes(base, maxNameBytes-len(suffix)-len(".json")) + suffix
 		eml := filepath.Join(day, name+".eml")
 		side := filepath.Join(day, name+".json")
 		if _, err := os.Lstat(side); err == nil {

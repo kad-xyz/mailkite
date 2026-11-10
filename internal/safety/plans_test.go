@@ -9,7 +9,7 @@ import (
 
 func TestPlansTakeOnceAndExpiry(t *testing.T) {
 	var ps Plans
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	now := time.Now()
 	id := ps.New(Plan{Action: "erase", Created: now, Button: "Стереть 2"})
 	if !regexp.MustCompile(`^[0-9a-f]{32}$`).MatchString(id) {
 		t.Fatalf("id %q", id)
@@ -51,10 +51,59 @@ func TestPlanHashOrderIndependent(t *testing.T) {
 
 func TestPlansNewDropsExpired(t *testing.T) {
 	var ps Plans
-	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
-	ps.New(Plan{Created: now})
-	ps.New(Plan{Created: now.Add(11 * time.Minute)})
+	now := time.Now()
+	ps.New(Plan{Created: now.Add(-11 * time.Minute)}) // expired by the wall clock
+	ps.New(Plan{Created: now.Add(-11 * time.Minute)}) // pruned by the next New
 	if len(ps.m) != 1 {
+		t.Fatalf("expired plan not pruned by wall clock: %d plans", len(ps.m))
+	}
+	fresh := ps.New(Plan{Created: now.Add(-time.Minute)})
+	ps.New(Plan{}) // Created defaults to time.Now()
+	if len(ps.m) != 2 {
 		t.Fatalf("%d plans kept", len(ps.m))
+	}
+	if _, ok := ps.m[fresh]; !ok {
+		t.Fatal("fresh plan pruned")
+	}
+}
+
+func TestNewPlanForAndVerify(t *testing.T) {
+	now := time.Now()
+	targets := map[string][]Target{
+		"U1": {{MessageID: "b@x", Mailbox: "INBOX", UID: 2}, {MessageID: "a@x", Mailbox: "INBOX", UID: 1}},
+		"U2": {{MessageID: "c@x", Mailbox: "INBOX", UID: 9}},
+	}
+	p, err := NewPlanFor("erase", targets, "3 письма", "Стереть 3", 42, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Action != "erase" || p.Summary != "3 письма" || p.Button != "Стереть 3" || p.Extra != 42 || !p.Created.Equal(now) || len(p.Account) != 2 {
+		t.Fatalf("%+v", p)
+	}
+	if p.Hash != PlanHash("erase", []string{"c@x", "a@x", "b@x"}) {
+		t.Fatalf("hash %s", p.Hash)
+	}
+	same := map[string][]Target{
+		"U2": {{MessageID: "c@x"}},
+		"U1": {{MessageID: "a@x"}, {MessageID: "b@x"}},
+	}
+	if err := p.Verify("erase", same); err != nil {
+		t.Fatalf("verify same targets: %v", err)
+	}
+	if err := p.Verify("move", same); err == nil {
+		t.Fatal("other action must fail")
+	}
+	extra := map[string][]Target{"U1": {{MessageID: "a@x"}, {MessageID: "b@x"}, {MessageID: "d@x"}}, "U2": {{MessageID: "c@x"}}}
+	if err := p.Verify("erase", extra); err == nil {
+		t.Fatal("changed targets must fail")
+	}
+	if err := p.Verify("erase", map[string][]Target{"U1": {{MessageID: "a@x"}, {MessageID: "b@x"}, {MessageID: ""}}, "U2": {{MessageID: "c@x"}}}); err == nil {
+		t.Fatal("empty Message-ID must fail verify")
+	}
+	if _, err := NewPlanFor("erase", map[string][]Target{"U1": {{MessageID: "a@x"}, {MessageID: " "}}}, "", "Стереть 2", nil, now); err == nil {
+		t.Fatal("empty Message-ID must be rejected")
+	}
+	if _, err := NewPlanFor("erase", nil, "", "Стереть 0", nil, now); err == nil {
+		t.Fatal("no targets must be rejected")
 	}
 }

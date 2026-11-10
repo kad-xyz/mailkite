@@ -121,3 +121,38 @@ func TestDefaultRootUsesHome(t *testing.T) {
 		t.Fatalf("%q %v", r, err)
 	}
 }
+
+func TestArchiveLongNamesAndModes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "mailkite")
+	a := Archive{Dir: filepath.Join(root, "archive")}
+	if err := os.MkdirAll(a.Dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(root, 0o755)
+	os.Chmod(a.Dir, 0o755)
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.Local)
+	s := maildata.Summary{ID: 1234567890123, Subject: strings.Repeat("😀", 60)}
+	for i := 0; i < 3; i++ {
+		p, err := a.Save(now, s, "INBOX", []byte("raw"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, n := range []string{filepath.Base(p), strings.TrimSuffix(filepath.Base(p), ".eml") + ".json"} {
+			if len(n) > 200 || !utf8.ValidString(n) {
+				t.Fatalf("name %d bytes, valid=%v: %q", len(n), utf8.ValidString(n), n)
+			}
+		}
+		if i == 2 && !strings.HasSuffix(p, "-3.eml") {
+			t.Fatalf("suffix lost: %q", p)
+		}
+		sc, err := ReadSidecar(p)
+		if err != nil || sc.Date != "" {
+			t.Fatalf("zero date must be empty: %+v %v", sc, err)
+		}
+	}
+	for _, d := range []string{root, a.Dir} {
+		if m := mode(t, d); m != 0o700 {
+			t.Fatalf("%s mode %o", d, m)
+		}
+	}
+}
