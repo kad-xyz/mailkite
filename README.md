@@ -25,11 +25,13 @@ Measured on one Mac (Apple silicon) with a stdio MCP client, same scenarios for 
 | Search by subject | 0.2 ms | 0.1 ms | 0.4 ms | 12.5 ms |
 | Search by sender | 0.2 ms | 0.1 ms | 0.4 ms | 11.8 ms |
 | Full-text search | 0.4 ms | n/a | 0.8 ms | 12.5 ms |
-| Read one message | 1.8 ms | 0.1 ms | 0.5 ms | 12.1 ms |
+| Read one message | 0.3 ms (0.9 ms uncached) | 0.1 ms | 0.5 ms | 12.1 ms |
 | Read reply size (chars) | 2,175 | 3,784 | 2,209 | 29,042 |
 | Idle CPU (5 s) | 0 | 0 | 0 | 0.02 s |
-| Peak RSS | 27.6 MB | 11.7 MB | 15.1 MB | 51.7 MB |
+| Peak RSS | 22.5 MB | 11.7 MB | 15.1 MB | 51.7 MB |
 | Binary size (arm64) | 13 MB | 6.7 MB | 5.7 MB | 7.5 MB |
+
+mailkite keeps the last parsed message, so the repeated read above is served from that cache; the uncached figure is the same message parsed from disk on every call. About 15 MB of its RSS is there before the first call: the MCP SDK links `net/http`, which on macOS loads the CoreFoundation and Security frameworks, and SQLite's code adds a few more once the mail index is opened.
 
 mailkite is not the smallest or the lowest-memory option; its advantages here are the schema size and the compact, pre-digested replies. All servers are sub-2 ms on this mailbox except the AppleScript- and Swift-based one.
 
