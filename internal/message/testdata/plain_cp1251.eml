@@ -1,0 +1,11 @@
+From: Ivan Petrov <ivan@example.ru>
+To: anna@example.com
+Message-ID: <m1@example.ru>
+Date: Mon, 10 Nov 2026 10:00:00 +0300
+Subject: Test
+MIME-Version: 1.0
+Content-Type: text/plain; charset=windows-1251
+Content-Transfer-Encoding: 8bit
+
+Привет, Анна! Это тестовое письмо в кодировке windows-1251, проверка.
+С уважением, Иван

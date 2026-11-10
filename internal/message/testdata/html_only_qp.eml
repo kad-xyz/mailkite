@@ -1,0 +1,16 @@
+From: Ivan Petrov <ivan@example.ru>
+To: anna@example.com
+Message-ID: <m1@example.ru>
+Date: Mon, 10 Nov 2026 10:00:00 +0300
+Subject: Confirm
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+<html><head><title>T</title><style>.a{color:red}</style></head><body>
+<div style=3D"display:none;max-height:0">Preheader secret text here</div>
+<p>=D0=97=D0=B4=D1=80=D0=B0=D0=B2=D1=81=D1=82=D0=B2=D1=83=D0=B9=D1=82=D0=B5=
+!</p>
+<p>=D0=9D=D0=B0=D0=B6=D0=BC=D0=B8=D1=82=D0=B5: <a href=3D"https://t.co/x">=
+=D0=9F=D0=BE=D0=B4=D1=82=D0=B2=D0=B5=D1=80=D0=B4=D0=B8=D1=82=D1=8C</a></p>
+</body></html>

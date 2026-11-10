@@ -1,0 +1,19 @@
+From: Ivan Petrov <ivan@example.ru>
+To: anna@example.com
+Message-ID: <m1@example.ru>
+Date: Mon, 10 Nov 2026 10:00:00 +0300
+Subject: Invoice
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BND"
+
+--BND
+Content-Type: text/plain; charset=utf-8
+
+Счёт во вложении, пожалуйста оплатите до пятницы.
+--BND
+Content-Type: application/pdf
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename*=UTF-8''%D0%A1%D1%87%D1%91%D1%82.pdf
+
+JVBERi0xLjQKMSAwIG9iajw8Pj5lbmRvYmoKdHJhaWxlcjw8Pj4KJSVFT0YK
+--BND--
