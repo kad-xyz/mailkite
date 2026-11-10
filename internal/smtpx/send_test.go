@@ -3,10 +3,13 @@ package smtpx
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"io"
 	"mime"
 	"net"
+	"net/http/httptest"
 	"net/mail"
 	"strconv"
 	"strings"
@@ -30,10 +33,11 @@ type Received struct {
 
 // TestServer is a go-smtp server on 127.0.0.1:0 (plain TCP, PLAIN auth allowed).
 type TestServer struct {
-	Host string
-	Port int
-	mu   sync.Mutex
-	got  []Received
+	Host  string
+	Port  int
+	Roots *x509.CertPool
+	mu    sync.Mutex
+	got   []Received
 }
 
 func (s *TestServer) Got() []Received {
@@ -73,15 +77,39 @@ func (x *session) Data(r io.Reader) error {
 func (x *session) Reset()        {}
 func (x *session) Logout() error { return nil }
 
-func startServer(t *testing.T) *TestServer {
+func startServer(t *testing.T) *TestServer { return startServerTLS(t, "") }
+
+// testCert is httptest's certificate (valid for 127.0.0.1) and a pool trusting it.
+func testCert(t *testing.T) (tls.Certificate, *x509.CertPool) {
+	t.Helper()
+	s := httptest.NewTLSServer(nil)
+	defer s.Close()
+	pool := x509.NewCertPool()
+	pool.AddCert(s.Certificate())
+	return s.TLS.Certificates[0], pool
+}
+
+// startServerTLS starts a server: mode "" plain, "tls" implicit TLS, "starttls"
+// STARTTLS offered; with TLS, auth is allowed only over TLS.
+func startServerTLS(t *testing.T, mode string) *TestServer {
 	t.Helper()
 	ts := &TestServer{}
 	srv := smtp.NewServer(smtp.BackendFunc(func(*smtp.Conn) (smtp.Session, error) { return &session{s: ts}, nil }))
 	srv.Domain = "localhost"
-	srv.AllowInsecureAuth = true
+	srv.AllowInsecureAuth = mode == ""
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if mode != "" {
+		cert, pool := testCert(t)
+		ts.Roots = pool
+		cfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+		if mode == "tls" {
+			l = tls.NewListener(l, cfg)
+		} else {
+			srv.TLSConfig = cfg
+		}
 	}
 	go srv.Serve(l)
 	t.Cleanup(func() { srv.Close() })
@@ -174,5 +202,30 @@ func TestSendRefusesWithoutTLS(t *testing.T) {
 	}
 	if err := SendWith(ctx, config.Account{Email: "me@example.com"}, "secret", "me@example.com", []string{"u@list.example"}, raw, Options{Insecure: true}); err == nil {
 		t.Fatal("no SMTP host must fail")
+	}
+}
+
+func TestSendTLSModes(t *testing.T) {
+	for _, mode := range []string{"tls", "starttls"} {
+		t.Run(mode, func(t *testing.T) {
+			ts := startServerTLS(t, mode)
+			a := config.Account{Email: "me@example.com", SMTPHost: ts.Host, SMTPPort: ts.Port, SMTPTLS: mode}
+			raw := Build("me@example.com", "unsub@list.example", "unsubscribe", "unsubscribe")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := SendWith(ctx, a, "secret", "me@example.com", []string{"unsub@list.example"}, raw, Options{roots: ts.Roots}); err != nil {
+				t.Fatal(err)
+			}
+			if got := ts.Got(); len(got) != 1 || got[0].User != "me@example.com" || got[0].To[0] != "unsub@list.example" {
+				t.Fatalf("%+v", got)
+			}
+			// Without trusting the test CA the certificate is refused.
+			if err := Send(ctx, a, "secret", "me@example.com", []string{"unsub@list.example"}, raw); err == nil {
+				t.Fatal("untrusted certificate must fail")
+			}
+			if len(ts.Got()) != 1 {
+				t.Fatal("nothing may be sent over an untrusted connection")
+			}
+		})
 	}
 }

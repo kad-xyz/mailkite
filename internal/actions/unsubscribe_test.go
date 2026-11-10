@@ -66,13 +66,48 @@ func TestOneClickURLGuard(t *testing.T) {
 		"https://169.254.169.254/latest",
 		"https:///nohost",
 		"ftp://shop.example/u",
+		"https://100.64.0.1/u",
+		"https://[fc00::1]/u",
+		"https://[fe80::1]/u",
+		"https://[::ffff:127.0.0.1]/u",
+		"https://0.0.0.0/u",
+		"https://192.0.0.8/u",
+		"https://198.18.0.1/u",
+		"https://198.19.255.1/u",
+		"https://240.0.0.1/u",
+		"https://[64:ff9b::7f00:1]/u",
+		"https://[64:ff9b::808:808]/u",
+		"https://[2002:7f00:1::1]/u",
+		"https://[2002:808:808::1]/u",
 	} {
 		if err := checkOneClickURL(u, false); err == nil {
 			t.Errorf("%s must be refused", u)
 		}
 	}
-	if err := checkOneClickURL("https://shop.example/u?a=1", false); err != nil {
-		t.Fatal(err)
+	for _, ok := range []string{"https://shop.example/u?a=1", "https://8.8.8.8/u", "https://[2606:4700::1111]/u"} {
+		if err := checkOneClickURL(ok, false); err != nil {
+			t.Fatalf("%s: %v", ok, err)
+		}
+	}
+}
+
+// TestOneClickDialGuard skips the URL check and shows the dialer itself refuses
+// a loopback peer when no test hook is set.
+func TestOneClickDialGuard(t *testing.T) {
+	hit := false
+	s := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
+	defer s.Close()
+	e := &Engine{}
+	c, tr := e.unsubClient()
+	defer tr.CloseIdleConnections()
+	req, _ := http.NewRequest(http.MethodPost, s.URL+"/u", strings.NewReader(oneClickBody))
+	resp, err := c.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("loopback peer must be refused at dial")
+	}
+	if !strings.Contains(err.Error(), "refusing a private or local address") || hit {
+		t.Fatalf("err %v hit %v", err, hit)
 	}
 }
 
@@ -273,7 +308,7 @@ func TestMailtoSends(t *testing.T) {
 	v.e.SendMail = func(ctx context.Context, a config.Account, pw, from string, to []string, raw []byte) error {
 		return smtpx.SendWith(ctx, a, pw, from, to, raw, smtpx.Options{Insecure: true})
 	}
-	h := "List-Id: <news.shop.example>\r\nList-Unsubscribe: <mailto:unsub@shop.example?subject=Remove%20me&cc=evil@x.example&bcc=evil2@x.example&to=more@x.example>\r\nPrecedence: bulk\r\n"
+	h := "Delivered-To: A@iCloud.example\r\nList-Id: <news.shop.example>\r\nList-Unsubscribe: <mailto:unsub@shop.example?subject=Remove%20me&cc=evil@x.example&bcc=evil2@x.example&to=more@x.example>\r\nPrecedence: bulk\r\n"
 	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "x", msgOpt{headers: &h})
 
 	p, err := v.e.BuildUnsubscribe(ctxT(t), []string{"news@shop.example"}, "")
@@ -393,5 +428,45 @@ func TestUnsubscribeRefusesBadInput(t *testing.T) {
 	p, err := v.e.BuildUnsubscribe(ctxT(t), []string{"nobody@nowhere.example"}, "")
 	if err != nil || len(p.Unsub) != 1 || p.Unsub[0].Method != "none" || p.PlanID != "" {
 		t.Fatalf("%+v %v", p, err)
+	}
+}
+
+func TestMailtoAliasIsManual(t *testing.T) {
+	v := newEnv(t)
+	v.e.Cfg.Accounts[0].SMTPHost, v.e.Cfg.Accounts[0].SMTPPort = "127.0.0.1", 1
+	sent := 0
+	v.e.SendMail = func(context.Context, config.Account, string, string, []string, []byte) error { sent++; return nil }
+	mailto := "mailto:unsub@shop.example?subject=stop"
+	h := "Delivered-To: alias@privaterelay.example\r\nX-Original-To: alias@privaterelay.example\r\nCc: Someone <other@x.example>\r\nList-Unsubscribe: <" + mailto + ">\r\nPrecedence: bulk\r\n"
+	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "x", msgOpt{headers: &h})
+	p, err := v.e.BuildUnsubscribe(ctxT(t), []string{"news@shop.example"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Unsub) != 1 || p.Unsub[0].Method != "manual" || p.Unsub[0].URL != mailto || p.PlanID != "" {
+		t.Fatalf("preview %+v", p)
+	}
+	if !strings.Contains(strings.Join(p.Skipped, "\n"), "sent to an alias; mailto would reveal your main address") {
+		t.Fatalf("skipped %v", p.Skipped)
+	}
+	if sent != 0 {
+		t.Fatal("nothing may be sent")
+	}
+}
+
+func TestNoAutomaticSenderWithCleanup(t *testing.T) {
+	v := newEnv(t)
+	none := "List-Id: <news.shop.example>\r\nPrecedence: bulk\r\n"
+	v.add(uuidA, "Shop <news@shop.example>", "Скидки 2", "x", msgOpt{headers: &none})
+	v.add(uuidA, "Shop <news@shop.example>", "Скидки", "Нажмите https://shop.example/unsubscribe", msgOpt{headers: &none})
+	p, err := v.e.BuildUnsubscribe(ctxT(t), []string{"news@shop.example"}, "erase")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.PlanID != "" || p.Count != 0 || len(p.BySender) != 0 || len(p.Protected) != 0 || p.Button != "" {
+		t.Fatalf("preview %+v", p)
+	}
+	if len(p.Unsub) != 1 || p.Unsub[0].Method != "manual" || !strings.Contains(strings.Join(p.Skipped, "\n"), "use cleanup") {
+		t.Fatalf("preview %+v", p)
 	}
 }

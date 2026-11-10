@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -9,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"regexp"
 	"strings"
@@ -79,14 +81,40 @@ func headerURLs(h string) []string {
 	return out
 }
 
-// blockedIP reports addresses a one-click request must never reach: loopback,
-// private, link-local, CGNAT, multicast and unspecified ranges.
-func blockedIP(ip net.IP) bool {
-	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1]&0xc0 == 64 {
-		return true // 100.64.0.0/10
+var blockedNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{
+		"100.64.0.0/10",  // CGNAT
+		"192.0.0.0/24",   // IETF protocol assignments
+		"198.18.0.0/15",  // benchmarking
+		"240.0.0.0/4",    // reserved (and broadcast)
+		"64:ff9b::/96",   // NAT64: may embed any IPv4, private ones too
+		"64:ff9b:1::/48", // local-use NAT64
+		"2002::/16",      // 6to4: may embed any IPv4
+	} {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic(err)
+		}
+		out = append(out, n)
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+	return out
+}()
+
+// blockedIP reports addresses a one-click request must never reach: loopback,
+// private, link-local, multicast, unspecified, CGNAT and reserved ranges, and the
+// NAT64/6to4 prefixes that can carry any of them.
+func blockedIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, n := range blockedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkOneClickURL accepts only https URLs without userinfo whose host is a name
@@ -254,6 +282,45 @@ func (e *Engine) newestFrom(ctx context.Context, needle string, match func(strin
 	return maildata.Summary{}, maildata.Mailbox{}, false, nil
 }
 
+var addrRe = regexp.MustCompile(`[^\s<>,;:"()]+@[^\s<>,;:"()]+`)
+
+// deliveredTo reports whether email is among the message's recipients (To, Cc,
+// Delivered-To, X-Original-To), case-insensitively. Mail sent to an alias is not:
+// answering it from the main address would reveal that address.
+func (e *Engine) deliveredTo(id int64, mb maildata.Mailbox, email string) bool {
+	path, _, ok := e.Store.EmlxPath(id, mb)
+	if !ok {
+		return false
+	}
+	raw, err := message.ReadEmlx(path)
+	if err != nil {
+		return false
+	}
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		return false
+	}
+	email = strings.TrimSpace(email)
+	for _, k := range []string{"To", "Cc", "Delivered-To", "X-Original-To"} {
+		for _, v := range msg.Header[k] {
+			var addrs []string
+			if list, err := mail.ParseAddressList(v); err == nil {
+				for _, a := range list {
+					addrs = append(addrs, a.Address)
+				}
+			} else {
+				addrs = addrRe.FindAllString(v, -1)
+			}
+			for _, a := range addrs {
+				if strings.EqualFold(strings.TrimSpace(a), email) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // mergeTargets joins the targets of both parts of a plan, so its hash covers both.
 func mergeTargets(parts ...map[string][]safety.Target) map[string][]safety.Target {
 	out := map[string][]safety.Target{}
@@ -320,6 +387,10 @@ func (e *Engine) BuildUnsubscribe(ctx context.Context, senders []string, alsoCle
 						}
 						it.Method = MethodManual
 						p.Skipped = append(p.Skipped, fmt.Sprintf("%s: mailto needs SMTP settings of account %s (run mailkite setup)", spec, sm.Account))
+					} else if !e.deliveredTo(sm.ID, mb, acc.Email) {
+						// Keep the mailto as the manual link; the user decides.
+						it.Method = MethodManual
+						p.Skipped = append(p.Skipped, spec+": sent to an alias; mailto would reveal your main address")
 					}
 				}
 				if it.Method == MethodOneClick || it.Method == MethodMailto {
@@ -337,6 +408,10 @@ func (e *Engine) BuildUnsubscribe(ctx context.Context, senders []string, alsoCle
 		p.Unsub = append(p.Unsub, it.UnsubLine)
 	}
 
+	if auto == 0 {
+		p.Skipped = append(p.Skipped, "no sender can be unsubscribed automatically; nothing to confirm (use cleanup to remove their mail)")
+		return p, nil
+	}
 	x := unsubExtra{Items: items, Sources: sources}
 	cleanupSummary := ""
 	if alsoCleanup != "" {
@@ -358,10 +433,6 @@ func (e *Engine) BuildUnsubscribe(ctx context.Context, senders []string, alsoCle
 			}
 			x.Cleanup, x.CleanupX, cleanupSummary = cplan.Account, cx, cplan.Summary
 		}
-	}
-	if auto == 0 {
-		p.Skipped = append(p.Skipped, "no sender can be unsubscribed automatically; nothing to confirm (use cleanup to remove their mail)")
-		return p, nil
 	}
 	action := unsubPrefix
 	p.Button = fmt.Sprintf("Отписаться: %d", auto)

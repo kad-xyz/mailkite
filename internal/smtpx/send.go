@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -35,6 +36,7 @@ const (
 type Options struct {
 	// Insecure talks plain TCP without TLS (and allows PLAIN auth over it). Tests only.
 	Insecure bool
+	roots    *x509.CertPool // tests: trust this CA instead of the system roots
 }
 
 // headerValue drops CR, LF and other control characters, so a value can never
@@ -161,28 +163,32 @@ func SendWith(ctx context.Context, a config.Account, password, from string, to [
 	}
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
-	tcfg := &tls.Config{ServerName: a.SMTPHost, MinVersion: tls.VersionTLS12}
+	tcfg := &tls.Config{ServerName: a.SMTPHost, MinVersion: tls.VersionTLS12, RootCAs: o.roots}
 	nd := &net.Dialer{Timeout: dialTimeout}
-	var nc net.Conn
-	var err error
-	if mode == "tls" && !o.Insecure {
-		nc, err = (&tls.Dialer{NetDialer: nd, Config: tcfg}).DialContext(dctx, "tcp", addr)
-	} else {
-		nc, err = nd.DialContext(dctx, "tcp", addr)
-	}
+	nc, err := nd.DialContext(dctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("smtp: connect %s: %w", addr, err)
 	}
+	// Deadlines are capped below the TLS layer, so go-smtp still sees a *tls.Conn
+	// (it detects encryption by that type).
 	conn := deadlineConn{nc, max}
 	conn.SetDeadline(time.Time{})
 	var c *smtp.Client
-	if mode == "starttls" && !o.Insecure {
+	switch {
+	case o.Insecure:
+		c = smtp.NewClient(conn)
+	case mode == "tls":
+		tc := tls.Client(conn, tcfg)
+		if err := tc.HandshakeContext(dctx); err != nil {
+			nc.Close()
+			return fmt.Errorf("smtp: tls %s: %w", addr, err)
+		}
+		c = smtp.NewClient(tc)
+	default:
 		if c, err = smtp.NewClientStartTLS(conn, tcfg); err != nil {
 			nc.Close()
 			return fmt.Errorf("smtp: starttls %s: %w", addr, err)
 		}
-	} else {
-		c = smtp.NewClient(conn)
 	}
 	defer c.Close()
 	if !o.Insecure {
