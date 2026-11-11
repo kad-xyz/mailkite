@@ -41,7 +41,11 @@ func runSetup(ctx context.Context, in io.Reader, out io.Writer,
 		return errors.New("no Mail accounts found")
 	}
 	for i, a := range accs {
-		fmt.Fprintf(out, "%d) %s [%s]\n", i+1, a.Name, a.Kind)
+		if a.Email != "" && !strings.EqualFold(a.Email, a.Name) {
+			fmt.Fprintf(out, "%d) %s [%s] %s\n", i+1, a.Name, a.Kind, a.Email)
+		} else {
+			fmt.Fprintf(out, "%d) %s [%s]\n", i+1, a.Name, a.Kind)
+		}
 	}
 	s, err := ask("Account number: ")
 	if err != nil {
@@ -53,12 +57,28 @@ func runSetup(ctx context.Context, in io.Reader, out io.Writer,
 	}
 	ma := accs[n-1]
 
-	email, err := ask("Email: ")
+	prompt := "Email: "
+	if ma.Email != "" {
+		prompt = "Email [" + ma.Email + "]: "
+	}
+	email, err := ask(prompt)
 	if err != nil {
 		return err
 	}
+	if email == "" {
+		email = ma.Email
+	}
 	if !strings.Contains(email, "@") {
 		return fmt.Errorf("invalid email %q", email)
+	}
+	if ma.Email != "" && normEmail(email) != normEmail(ma.Email) {
+		yes, err := ask(fmt.Sprintf("Mail signs in to this account as %s, not %s. Use %s anyway? (yes/no): ", ma.Email, email, email))
+		if err != nil {
+			return err
+		}
+		if strings.ToLower(yes) != "yes" {
+			return fmt.Errorf("email %s does not match the Mail account %s", email, ma.Email)
+		}
 	}
 	preset, err := ask("Preset (icloud/gmail/manual): ")
 	if err != nil {
@@ -159,4 +179,15 @@ func askHost(ask func(string) (string, error), prompt string) (string, error) {
 		return "", errors.New("host must not be empty")
 	}
 	return h, nil
+}
+
+// normEmail lowercases an address and drops the dots Gmail ignores in the local part.
+func normEmail(e string) string {
+	e = strings.ToLower(strings.TrimSpace(e))
+	local, domain, ok := strings.Cut(e, "@")
+	if ok && (domain == "gmail.com" || domain == "googlemail.com") {
+		local = strings.ReplaceAll(local, ".", "")
+		domain = "gmail.com"
+	}
+	return local + "@" + domain
 }

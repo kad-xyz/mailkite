@@ -114,3 +114,50 @@ func TestSetupManualEmptyHost(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+func gmailLister(context.Context) ([]maildata.Account, error) {
+	return []maildata.Account{{UUID: "G-1", Name: "Google", Kind: "imap", Email: "first.last@gmail.com"}}, nil
+}
+
+func TestSetupDefaultsToMailEmail(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	st := &fakeStore{}
+	var out bytes.Buffer
+	if err := runSetup(context.Background(), strings.NewReader("1\n\ngmail\n"), &out, gmailLister, st, nil, p); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := config.Load(p)
+	if c.Accounts[0].Email != "first.last@gmail.com" || !strings.Contains(out.String(), "Google [imap] first.last@gmail.com") {
+		t.Fatalf("%+v\n%s", c.Accounts[0], out.String())
+	}
+}
+
+func TestSetupGmailDotsMatch(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := runSetup(context.Background(), strings.NewReader("1\nFirstLast@gmail.com\ngmail\n"), &bytes.Buffer{}, gmailLister, &fakeStore{}, nil, p); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSetupOtherEmailRefused(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	st := &fakeStore{}
+	err := runSetup(context.Background(), strings.NewReader("1\nother@gmail.com\nno\n"), &bytes.Buffer{}, gmailLister, st, nil, p)
+	if err == nil || len(st.set) != 0 {
+		t.Fatalf("err=%v set=%v", err, st.set)
+	}
+	if _, statErr := os.Stat(p); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("config written: %v", statErr)
+	}
+}
+
+func TestSetupOtherEmailConfirmed(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := runSetup(context.Background(), strings.NewReader("1\nother@gmail.com\nyes\ngmail\n"), &bytes.Buffer{}, gmailLister, &fakeStore{}, nil, p); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := config.Load(p)
+	if c.Accounts[0].Email != "other@gmail.com" {
+		t.Fatalf("%+v", c.Accounts[0])
+	}
+}

@@ -41,6 +41,7 @@ type Store struct {
 
 	accMu    sync.Mutex
 	accNames map[string]string // account UUID -> resolved name
+	accEmail map[string]string // account UUID -> login address, when Mail knows one
 	accStamp string            // fingerprint of the Accounts db files at load time
 }
 

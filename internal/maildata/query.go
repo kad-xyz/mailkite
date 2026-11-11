@@ -17,6 +17,7 @@ var ErrNotFound = errors.New("message not found")
 // Account is one mail account that owns at least one mailbox.
 type Account struct {
 	UUID, Name, Kind string
+	Email            string // login address from the Accounts db, empty when unknown
 	Mailboxes        []Mailbox
 	Messages, Unread int // non-deleted messages outside trash and junk mailboxes
 }
@@ -100,34 +101,48 @@ func (s *Store) accountNames() map[string]string {
 	if s.accNames != nil && stamp == s.accStamp {
 		return s.accNames
 	}
-	names, err := s.loadAccountNames()
+	names, emails, err := s.loadAccountNames()
 	if err != nil {
 		// Do not cache a failure: fall back to UUIDs for this call and retry next time.
 		return map[string]string{}
 	}
-	s.accNames, s.accStamp = names, stamp
+	s.accNames, s.accEmail, s.accStamp = names, emails, stamp
 	return names
 }
 
-func (s *Store) loadAccountNames() (map[string]string, error) {
+// accountEmails returns UUID -> login address of the account (own or parent), when it looks like an email.
+func (s *Store) accountEmails() map[string]string {
+	s.accountNames()
+	s.accMu.Lock()
+	defer s.accMu.Unlock()
+	return s.accEmail
+}
+
+func (s *Store) loadAccountNames() (map[string]string, map[string]string, error) {
 	db, err := openReadOnly(s.accountsDB)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT a.ZIDENTIFIER, a.ZACCOUNTDESCRIPTION, a.ZUSERNAME, p.ZACCOUNTDESCRIPTION, p.ZUSERNAME, t.ZACCOUNTTYPEDESCRIPTION
 		FROM ZACCOUNT a LEFT JOIN ZACCOUNT p ON p.Z_PK = a.ZPARENTACCOUNT
 		LEFT JOIN ZACCOUNTTYPE t ON t.Z_PK = a.ZACCOUNTTYPE WHERE a.ZIDENTIFIER IS NOT NULL`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	names := map[string]string{}
+	names, emails := map[string]string{}, map[string]string{}
 	for rows.Next() {
 		var id string
 		var c [5]sql.NullString
 		if err := rows.Scan(&id, &c[0], &c[1], &c[2], &c[3], &c[4]); err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		for _, v := range []sql.NullString{c[1], c[3]} { // own user, parent user
+			if v.Valid && strings.Contains(v.String, "@") {
+				emails[id] = strings.TrimSpace(v.String)
+				break
+			}
 		}
 		for _, v := range c { // own desc, own user, parent desc, parent user, type
 			if v.Valid && strings.TrimSpace(v.String) != "" {
@@ -136,7 +151,7 @@ func (s *Store) loadAccountNames() (map[string]string, error) {
 			}
 		}
 	}
-	return names, rows.Err()
+	return names, emails, rows.Err()
 }
 
 func (s *Store) loadMailboxes(ctx context.Context) ([]Mailbox, error) {
@@ -190,13 +205,13 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	names := s.accountNames()
+	names, emails := s.accountNames(), s.accountEmails()
 	byUUID := map[string]*Account{}
 	var order []string
 	for _, mb := range mbs {
 		a := byUUID[mb.AccountUUID]
 		if a == nil {
-			a = &Account{UUID: mb.AccountUUID, Name: accountName(names, mb.AccountUUID), Kind: mb.Kind}
+			a = &Account{UUID: mb.AccountUUID, Name: accountName(names, mb.AccountUUID), Email: emails[mb.AccountUUID], Kind: mb.Kind}
 			byUUID[mb.AccountUUID] = a
 			order = append(order, mb.AccountUUID)
 		}
