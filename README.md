@@ -18,18 +18,19 @@
 
 A small, fast MCP server for Apple Mail on macOS. It reads Mail's own local data directly, so searches take a fraction of a millisecond on a small mailbox (measured on about 110 messages), the process uses no CPU while idle, and the tool descriptions cost very few tokens.
 
-Stage 1 is read-only. Writing tools (move, delete, send) are on the roadmap and will require a native macOS confirmation dialog.
+It also cleans up: bulk erase, trash, move and mark, and unsubscribing from senders. Nothing is changed until you confirm in a native macOS dialog, and every erased message is archived locally first. Sending mail is on the roadmap.
 
 ## Why
 
-- **Fast.** Queries read the Envelope Index and `.emlx` files directly: no AppleScript, no IMAP round trips.
+- **Fast.** Reading never leaves the Mac: queries use the Envelope Index and `.emlx` files directly, with no AppleScript and no IMAP round trips.
 - **No idle cost.** One static Go binary with no background work: no timers, no indexing daemons, so CPU is 0 while idle. (Memory is moderate, see the benchmark.)
-- **Token-lean.** Five tools, about 700 tokens of schema in total. Replies are one line per message; `read` returns at most 4000 characters by default and pages with `offset`.
+- **Token-lean.** Nine tools, about 1,400 tokens of schema in total. Replies are one line per message; `read` returns at most 4000 characters by default and pages with `offset`.
 - **Useful output.** `read` extracts verification codes, links and the attachment list up front, and gives a `message://` link that opens the message in Mail.
+- **Safe cleanup.** Every change is previewed first and runs only after you press the button in a macOS dialog. The model cannot press it for you.
 
 ## Benchmark
 
-Measured on one Mac (Apple silicon) with a stdio MCP client, same scenarios for each server, 7 calls per scenario, medians. The mailbox is small: about 110 messages across 3 accounts. Results on large mailboxes are not measured yet, so treat the numbers as a comparison of fixed overhead, not of scaling.
+Measured for the read-only stage (five tools) on one Mac (Apple silicon) with a stdio MCP client, same scenarios for each server, 7 calls per scenario, medians. The mailbox is small: about 110 messages across 3 accounts. Results on large mailboxes are not measured yet, so treat the numbers as a comparison of fixed overhead, not of scaling.
 
 | | mailkite | rusty_apple_mail_mcp | mailidx | che-apple-mail-mcp |
 |---|---|---|---|---|
@@ -76,7 +77,14 @@ CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/mailkite ./cmd/mailkite
 
 ### Command line
 
-Besides the stdio server (no arguments), the binary has two subcommands: `mailkite index` builds the full-text search index from scratch (otherwise it is built on the first `find` with `query`), and `mailkite version` prints the version.
+Besides the stdio server (no arguments), the binary has these subcommands:
+
+| Command | What it does |
+|---|---|
+| `mailkite setup` | Connect a Mail account for cleanup: choose it from the list, pick a preset (`icloud`, `gmail` or `manual`) and enter an app password. Run it in a terminal window. |
+| `mailkite restore <path>` | Put archived messages back: one `.eml` file or a whole day directory of the archive. |
+| `mailkite index` | Rebuild the full-text search index from scratch (otherwise it is built on the first `find` with `query`). |
+| `mailkite version` | Print the version. |
 
 ### Full Disk Access
 
@@ -90,6 +98,21 @@ claude mcp add mailkite --scope user -- /path/to/mailkite
 
 Any other MCP client that can launch a stdio server works the same way.
 
+### Accounts for cleanup
+
+Reading needs nothing beyond Full Disk Access. Changing mail on the server needs the account's password, so run `mailkite setup` once per account in a terminal window:
+
+```sh
+mailkite setup
+```
+
+It lists your Mail accounts with their addresses. Press Enter to keep the address Mail uses, choose a preset, then paste an **app password** when `security` asks for it twice (typing is not echoed):
+
+- iCloud: [account.apple.com](https://account.apple.com) → Sign-In and Security → App-Specific Passwords.
+- Gmail: [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords) (needs 2-Step Verification).
+
+The password goes straight into your login Keychain (service `mailkite`) and is never written to disk or shown to the model. `setup` logs in to check it before saving the account to `~/.config/mailkite/config.json` (mode `0600`). POP accounts are changed through Mail itself with AppleScript.
+
 ## Tools
 
 | Tool | What it does |
@@ -99,8 +122,52 @@ Any other MCP client that can launch a stdio server works the same way.
 | `read` | Read one message: headers, codes, links, attachments and text, with paging. |
 | `save_attachment` | Save one or all attachments of a message to disk without overwriting existing files. |
 | `senders` | Top senders with message counts, for finding newsletters and noise. |
+| `cleanup` | Preview erasing, trashing, marking read or moving messages, by ids or filters, optionally unsubscribing too. |
+| `unsubscribe` | Preview unsubscribing from senders. |
+| `mark` | Mark messages read, unread, flagged or unflagged, or move them. |
+| `execute` | Run a previewed plan after you confirm it in a macOS dialog. |
 
-All five tools are annotated read-only.
+`status`, `find`, `read`, `save_attachment`, `senders`, `cleanup` and `unsubscribe` never change mail. `cleanup` and `unsubscribe` only return a plan.
+
+## Writing safely
+
+Every change follows the same path:
+
+1. **Preview.** `cleanup`, `unsubscribe` or `mark` lists what would change, grouped by sender, and returns a `plan_id`. Nothing has been touched yet.
+2. **Confirm.** `execute` with that `plan_id` opens a macOS dialog with the action, the count and the senders. **Cancel** is the default button; if nobody answers within 120 seconds, the plan is dropped. Only the button you press runs it. A plan works once and expires after 10 minutes.
+3. **Act.** Before a message is erased, its full source is saved to the archive. Then it is removed on the server: IMAP accounts are changed directly (`UID EXPUNGE`, which needs the `UIDPLUS` extension); on Gmail the message is moved to Trash and erased there, so it also disappears from All Mail. Each message is checked by Message-ID before it is touched, so a stale index cannot hit the wrong one.
+
+`mark` with read, unread, flag or unflag on up to 20 messages runs right away, since those changes are easy to undo. Moves and larger batches go through the dialog. The limit is `MarkLimit` in the config.
+
+### Protected mail
+
+Some mail is never included in a bulk action unless you name its id in `include_protected`:
+
+- verification codes and password or sign-in messages;
+- receipts, invoices, orders, tickets and bank statements;
+- mail from banks and government services;
+- mail from people (not lists or automated senders);
+- anything matching your own rules in the config: `ProtectedDomains`, `ProtectedAddresses` and `ProtectedKeywords`.
+
+Previews say how many messages were left out and why.
+
+### Unsubscribing
+
+mailkite uses only the sender's `List-Unsubscribe` header, never links from the body:
+
+- **one-click** (RFC 8058): an HTTPS POST; private, local and other internal addresses are refused;
+- **mail**: a message with the fixed text "unsubscribe" to the one address in the header, sent from the account that received the newsletter (never from another of your addresses);
+- otherwise the preview shows the link to open yourself.
+
+### Archive and restore
+
+Erased messages are kept as `.eml` files in `~/Library/Application Support/mailkite/archive/<day>/` for 30 days. To put them back:
+
+```sh
+mailkite restore ~/Library/Application\ Support/mailkite/archive/2026-11-11
+```
+
+Actions are logged to `~/Library/Application Support/mailkite/actions.log`: time, action, account, count and result. Subjects and addresses are not logged.
 
 ## Notes
 
@@ -111,13 +178,17 @@ All five tools are annotated read-only.
 
 ## Privacy
 
-Everything is local. mailkite makes no network connections. Mail's data is opened read-only. The search index is stored at `~/Library/Caches/mailkite` with `0600` permissions and can be deleted at any time; it is rebuilt on demand.
+Reading is local: Mail's data is opened read-only and no network connection is made. The search index is stored at `~/Library/Caches/mailkite` with `0600` permissions and can be deleted at any time; it is rebuilt on demand.
 
-Since all current tools are read-only and `save_attachment` is confined to `~/Downloads` (plus any folders you list in `MAILKITE_SAVE_DIRS`, so list only folders you would not mind receiving files), it is reasonable to auto-approve them in your MCP client. Do not blanket-approve future writing tools.
+mailkite connects to the network only when you confirm an action: to your mail servers (IMAP, and SMTP for unsubscribe-by-mail) and to the one-click unsubscribe URL of a sender you chose.
+
+It is reasonable to auto-approve the tools that never change mail (`status`, `find`, `read`, `senders`, `cleanup`, `unsubscribe`) and `save_attachment`, which is confined to `~/Downloads` plus any folders you list in `MAILKITE_SAVE_DIRS` (list only folders you would not mind receiving files). Leave `mark` and `execute` on manual approval. The dialog still protects you if you don't, but there is no reason to remove a layer.
+
+Note that mailkite reads the password through the `security` command-line tool, which the Keychain item trusts. Any process running as your user can read it the same way, as with any password stored by `security`. Use an app password, not your account password, so you can revoke it at any time.
 
 ## Roadmap
 
-Writing tools (move, archive, delete, send) are planned, each gated by a macOS confirmation dialog.
+Writing and sending mail, gated by the same confirmation dialog.
 
 ## License
 
