@@ -1,0 +1,59 @@
+{
+ "startup_s": 0.095,
+ "tools": 59,
+ "schema_chars": 96085,
+ "schema_tokens_est": 24021,
+ "calls": [
+  {
+   "tool": "list_accounts",
+   "label": "accounts",
+   "median_ms": 313.6,
+   "min_ms": 283.5,
+   "resp_chars": 1053,
+   "error": null
+  },
+  {
+   "tool": "list_emails",
+   "label": "recent50",
+   "median_ms": 12.0,
+   "min_ms": 5.0,
+   "resp_chars": 3821,
+   "error": null
+  },
+  {
+   "tool": "search_emails",
+   "label": "subject",
+   "median_ms": 12.5,
+   "min_ms": 4.1,
+   "resp_chars": 1118,
+   "error": null
+  },
+  {
+   "tool": "search_emails",
+   "label": "sender",
+   "median_ms": 11.8,
+   "min_ms": 11.2,
+   "resp_chars": 1622,
+   "error": null
+  },
+  {
+   "tool": "search_emails",
+   "label": "body",
+   "median_ms": 12.5,
+   "min_ms": 7.0,
+   "resp_chars": 1118,
+   "error": null
+  },
+  {
+   "tool": "get_email",
+   "label": "get",
+   "median_ms": 12.1,
+   "min_ms": 8.5,
+   "resp_chars": 29042,
+   "error": null
+  }
+ ],
+ "idle_cpu_5s": 0.02,
+ "cpu_total_s": 0.41,
+ "peak_rss_mb": 51.7
+}

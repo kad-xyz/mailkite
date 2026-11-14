@@ -1,0 +1,5 @@
+[{"label":"accounts","name":"list_accounts","repeat":7},
+ {"label":"recent50","name":"search_messages","args":{"limit":50},"repeat":7},
+ {"label":"subject","name":"search_messages","args":{"subject_query":"SUBJECT_WORD","limit":20},"repeat":7},
+ {"label":"sender","name":"search_messages","args":{"sender":"sender@example.com","limit":20},"repeat":7},
+ {"label":"get","name":"get_message","args":{"message_id":"12345"},"repeat":7}]

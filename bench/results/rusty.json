@@ -1,0 +1,51 @@
+{
+ "startup_s": 0.017,
+ "tools": 4,
+ "schema_chars": 14513,
+ "schema_tokens_est": 3628,
+ "calls": [
+  {
+   "tool": "list_accounts",
+   "label": "accounts",
+   "median_ms": 0.1,
+   "min_ms": 0.1,
+   "resp_chars": 1196,
+   "error": null
+  },
+  {
+   "tool": "search_messages",
+   "label": "recent50",
+   "median_ms": 0.0,
+   "min_ms": 0.0,
+   "resp_chars": 2,
+   "error": "{\"code\": -32602, \"message\": \"At least one filter must be provided: subject_query, date_from, date_to, sender, participant, account, or mailbox.\"}"
+  },
+  {
+   "tool": "search_messages",
+   "label": "subject",
+   "median_ms": 0.1,
+   "min_ms": 0.1,
+   "resp_chars": 854,
+   "error": null
+  },
+  {
+   "tool": "search_messages",
+   "label": "sender",
+   "median_ms": 0.1,
+   "min_ms": 0.1,
+   "resp_chars": 1208,
+   "error": null
+  },
+  {
+   "tool": "get_message",
+   "label": "get",
+   "median_ms": 0.1,
+   "min_ms": 0.1,
+   "resp_chars": 3784,
+   "error": null
+  }
+ ],
+ "idle_cpu_5s": 0.0,
+ "cpu_total_s": 0.01,
+ "peak_rss_mb": 11.7
+}

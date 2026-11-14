@@ -1,0 +1,59 @@
+{
+ "startup_s": 0.005,
+ "tools": 5,
+ "schema_chars": 2805,
+ "schema_tokens_est": 701,
+ "calls": [
+  {
+   "tool": "status",
+   "label": "accounts",
+   "median_ms": 0.2,
+   "min_ms": 0.2,
+   "resp_chars": 269,
+   "error": null
+  },
+  {
+   "tool": "find",
+   "label": "recent50",
+   "median_ms": 0.3,
+   "min_ms": 0.2,
+   "resp_chars": 2571,
+   "error": null
+  },
+  {
+   "tool": "find",
+   "label": "subject",
+   "median_ms": 0.2,
+   "min_ms": 0.2,
+   "resp_chars": 191,
+   "error": null
+  },
+  {
+   "tool": "find",
+   "label": "sender",
+   "median_ms": 0.2,
+   "min_ms": 0.2,
+   "resp_chars": 281,
+   "error": null
+  },
+  {
+   "tool": "find",
+   "label": "body",
+   "median_ms": 0.4,
+   "min_ms": 0.3,
+   "resp_chars": 281,
+   "error": null
+  },
+  {
+   "tool": "read",
+   "label": "get",
+   "median_ms": 1.8,
+   "min_ms": 1.7,
+   "resp_chars": 2175,
+   "error": null
+  }
+ ],
+ "idle_cpu_5s": 0.0,
+ "cpu_total_s": 0.08,
+ "peak_rss_mb": 27.6
+}

@@ -1,0 +1,6 @@
+[{"label":"accounts","name":"list_accounts","repeat":7},
+ {"label":"recent50","name":"list_emails","args":{"account_name":"ACCOUNT_NAME","mailbox":"INBOX","limit":50},"repeat":7},
+ {"label":"subject","name":"search_emails","args":{"query":"SUBJECT_WORD","field":"subject","limit":20},"repeat":7},
+ {"label":"sender","name":"search_emails","args":{"query":"sender@example.com","field":"sender","limit":20},"repeat":7},
+ {"label":"body","name":"search_emails","args":{"query":"BODY_WORD","field":"any","limit":20},"repeat":7},
+ {"label":"get","name":"get_email","args":{"id":"12345","format":"text"},"repeat":7}]

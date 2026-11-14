@@ -52,6 +52,8 @@ mailkite keeps the last parsed message, so the repeated read above is served fro
 
 mailkite is not the smallest or the lowest-memory option; its advantages here are the schema size and the compact, pre-digested replies. On this small mailbox every server except the AppleScript- and Swift-based one answers in about a millisecond or less, and mailidx's status call takes 8.5 ms.
 
+The client, the scenarios and the raw results are in [`bench/`](bench/README.md), so you can rerun it on your own mailbox.
+
 ## Install
 
 Download a prebuilt binary (Apple silicon or Intel) from the [latest release](https://github.com/kad-xyz/mailkite/releases/latest):

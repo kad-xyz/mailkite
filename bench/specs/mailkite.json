@@ -1,0 +1,6 @@
+[{"label":"accounts","name":"status","repeat":7},
+ {"label":"recent50","name":"find","args":{"limit":50},"repeat":7},
+ {"label":"subject","name":"find","args":{"subject":"SUBJECT_WORD","limit":20},"repeat":7},
+ {"label":"sender","name":"find","args":{"from":"sender@example.com","limit":20},"repeat":7},
+ {"label":"body","name":"find","args":{"query":"BODY_WORD","limit":20},"repeat":7},
+ {"label":"get","name":"read","args":{"id":12345},"repeat":7}]
