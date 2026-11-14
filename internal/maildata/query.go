@@ -19,7 +19,7 @@ type Account struct {
 	UUID, Name, Kind string
 	Email            string // login address from the Accounts db, empty when unknown
 	Mailboxes        []Mailbox
-	Messages, Unread int // non-deleted messages outside trash and junk mailboxes
+	Messages, Unread int // non-deleted messages outside trash and junk, each counted once
 }
 
 // Filter selects messages. Zero values mean "no constraint".
@@ -187,28 +187,12 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, "SELECT mailbox, count(*), coalesce(sum(read=0),0) FROM messages WHERE deleted=0 GROUP BY mailbox")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	type cnt struct{ n, unread int }
-	counts := map[int64]cnt{}
-	for rows.Next() {
-		var id int64
-		var c cnt
-		if err := rows.Scan(&id, &c.n, &c.unread); err != nil {
-			return nil, err
-		}
-		counts[id] = c
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	names, emails := s.accountNames(), s.accountEmails()
 	byUUID := map[string]*Account{}
+	byID := make(map[int64]Mailbox, len(mbs))
 	var order []string
 	for _, mb := range mbs {
+		byID[mb.ID] = mb
 		a := byUUID[mb.AccountUUID]
 		if a == nil {
 			a = &Account{UUID: mb.AccountUUID, Name: accountName(names, mb.AccountUUID), Email: emails[mb.AccountUUID], Kind: mb.Kind}
@@ -216,12 +200,47 @@ func (s *Store) Accounts(ctx context.Context) ([]Account, error) {
 			order = append(order, mb.AccountUUID)
 		}
 		a.Mailboxes = append(a.Mailboxes, mb)
-		// All Mail repeats every other mailbox of a Gmail account; skip it to avoid double counts
-		if mb.Role != RoleTrash && mb.Role != RoleJunk && mb.Role != RoleAll {
-			c := counts[mb.ID]
-			a.Messages += c.n
-			a.Unread += c.unread
+	}
+	// Count each message once per account. Mail stores a Gmail message once (in All
+	// Mail, with INBOX and the like as labels), but an index may also keep a copy
+	// per mailbox; copies share global_message_id, one row per Message-ID.
+	rows, err := s.db.QueryContext(ctx, "SELECT ROWID, mailbox, global_message_id, read FROM messages WHERE deleted = 0")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type key struct {
+		account string
+		global  int64
+	}
+	seen := map[key]bool{}
+	for rows.Next() {
+		var id, mid int64
+		var global sql.NullInt64
+		var read bool
+		if err := rows.Scan(&id, &mid, &global, &read); err != nil {
+			return nil, err
 		}
+		mb, ok := byID[mid]
+		if !ok || mb.Role == RoleTrash || mb.Role == RoleJunk {
+			continue
+		}
+		k := key{mb.AccountUUID, -id} // no global row: the copy counts on its own
+		if global.Valid && global.Int64 > 0 {
+			k.global = global.Int64
+		}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		a := byUUID[mb.AccountUUID]
+		a.Messages++
+		if !read {
+			a.Unread++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	sort.Strings(order)
 	out := make([]Account, 0, len(order))
@@ -275,9 +294,15 @@ func (s *Store) scan(ctx context.Context, f Filter, fn func(sm Summary, mb Mailb
 	}
 	names := s.accountNames()
 	byID := make(map[int64]Mailbox, len(mbs))
-	var allowed []any
+	var allowed, stored []any
 	for _, mb := range mbs {
 		byID[mb.ID] = mb
+		if f.Account != "" && !strings.EqualFold(mb.AccountUUID, f.Account) && !strings.EqualFold(accountName(names, mb.AccountUUID), f.Account) {
+			continue
+		}
+		if mb.Role != RoleTrash && mb.Role != RoleJunk {
+			stored = append(stored, mb.ID)
+		}
 		switch {
 		case f.Role != "" && mb.Role != f.Role:
 			continue
@@ -285,16 +310,23 @@ func (s *Store) scan(ctx context.Context, f Filter, fn func(sm Summary, mb Mailb
 			continue
 		case f.Mailbox != "" && !strings.EqualFold(mb.Name, f.Mailbox):
 			continue
-		case f.Account != "" && !strings.EqualFold(mb.AccountUUID, f.Account) && !strings.EqualFold(accountName(names, mb.AccountUUID), f.Account):
-			continue
 		}
 		allowed = append(allowed, mb.ID)
 	}
 	if len(allowed) == 0 {
 		return nil
 	}
-	where := []string{"m.deleted = 0", "m.mailbox IN (?" + strings.Repeat(",?", len(allowed)-1) + ")"}
-	args := allowed
+	in := func(ids []any) string { return "(?" + strings.Repeat(",?", len(ids)-1) + ")" }
+	where := []string{"m.deleted = 0", "m.mailbox IN " + in(allowed)}
+	args := append([]any{}, allowed...)
+	// A Gmail message is stored once, in All Mail; INBOX, Sent Mail and other labels
+	// are rows of the labels table. A mailbox filter also matches those labels, but
+	// only for messages not stored in trash or junk.
+	if s.hasLabels && (f.Role != "" || f.Mailbox != "") && len(stored) > 0 {
+		where[1] = "(m.mailbox IN " + in(allowed) + " OR (m.mailbox IN " + in(stored) +
+			" AND EXISTS (SELECT 1 FROM labels l WHERE l.message_id = m.ROWID AND l.mailbox_id IN " + in(allowed) + ")))"
+		args = append(append(args, stored...), allowed...)
+	}
 	var goFilters []func(Summary) bool
 	text := func(needle, col string, get func(Summary) string) {
 		if needle == "" {
@@ -471,8 +503,15 @@ func (s *Store) Senders(ctx context.Context, f Filter, minCount int) ([]SenderGr
 	idx := map[string]int{}
 	var groups []SenderGroup
 	byDefault := f.Role == "" && f.Mailbox == ""
+	var own map[int64]bool
+	if byDefault {
+		var err error
+		if own, err = s.labeled(ctx, RoleSent, RoleDrafts); err != nil {
+			return nil, err
+		}
+	}
 	err := s.scan(ctx, f, func(sm Summary, mb Mailbox) bool {
-		if byDefault && (mb.Role == RoleSent || mb.Role == RoleDrafts) {
+		if byDefault && (mb.Role == RoleSent || mb.Role == RoleDrafts || own[sm.ID]) {
 			return true // our own addresses, not senders
 		}
 		k := DedupKey(sm, mb)
@@ -512,6 +551,43 @@ func (s *Store) Senders(ctx context.Context, f Filter, minCount int) ([]SenderGr
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
 	return out, nil
+}
+
+// labeled returns the ROWIDs of messages that carry a label (Gmail) of a mailbox
+// with one of the roles, such as Sent Mail for a message stored in All Mail.
+func (s *Store) labeled(ctx context.Context, roles ...Role) (map[int64]bool, error) {
+	if !s.hasLabels {
+		return nil, nil
+	}
+	mbs, err := s.loadMailboxes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ids []any
+	for _, mb := range mbs {
+		for _, r := range roles {
+			if mb.Role == r {
+				ids = append(ids, mb.ID)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, "SELECT message_id FROM labels WHERE mailbox_id IN (?"+strings.Repeat(",?", len(ids)-1)+")", ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 // RemoteID returns messages.remote_id of a message: its IMAP UID in its mailbox

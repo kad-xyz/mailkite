@@ -314,3 +314,52 @@ func TestSendersDefaultSkipsSentAndDrafts(t *testing.T) {
 		t.Errorf("explicit sent: %+v %v", g, err)
 	}
 }
+
+// gmailLabels builds a Gmail account the way Mail stores it: every message has one
+// row in All Mail (named allMail), and INBOX or Sent Mail are labels of that row.
+func gmailLabels(t *testing.T, allMail, sent string) *Store {
+	t.Helper()
+	f := testfixture.New(t)
+	f.AddAccount("G", "Gmail", "IMAP")
+	all := "imap://G/%5BGmail%5D/" + allMail
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: all, From: "news@shop.example", Subject: "in inbox", Received: tm(1),
+		Labels: []string{"imap://G/INBOX"}})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: all, From: "old@shop.example", Subject: "archived", Received: tm(2), Read: true})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: all, From: "me@gmail.example", Subject: "sent", Received: tm(3), Read: true,
+		Labels: []string{"imap://G/%5BGmail%5D/" + sent}})
+	f.AddMessage(testfixture.FixtureMsg{MailboxURL: "imap://G/%5BGmail%5D/Trash", From: "gone@shop.example", Subject: "trashed", Received: tm(4)})
+	return openFix(t, f)
+}
+
+func TestGmailLabels(t *testing.T) {
+	for _, names := range [][2]string{{"All%20Mail", "Sent%20Mail"}, {"%D0%92%D1%81%D1%8F%20%D0%BF%D0%BE%D1%87%D1%82%D0%B0", "%D0%9E%D1%82%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%BD%D1%8B%D0%B5"}} {
+		s := gmailLabels(t, names[0], names[1])
+		acc, err := s.Accounts(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(acc) != 1 || acc[0].Messages != 3 || acc[0].Unread != 1 {
+			t.Errorf("%s: accounts %+v", names[0], acc)
+		}
+		items, _, err := s.Find(ctx, Filter{Role: RoleInbox})
+		if err != nil || len(items) != 1 || items[0].Subject != "in inbox" {
+			t.Errorf("%s: inbox %+v %v", names[0], items, err)
+		}
+		items, _, err = s.Find(ctx, Filter{Mailbox: "inbox", Account: "Gmail"})
+		if err != nil || len(items) != 1 {
+			t.Errorf("%s: mailbox INBOX %+v %v", names[0], items, err)
+		}
+		items, _, err = s.Find(ctx, Filter{Role: RoleSent})
+		if err != nil || len(items) != 1 || items[0].Subject != "sent" {
+			t.Errorf("%s: sent %+v %v", names[0], items, err)
+		}
+		items, _, err = s.Find(ctx, Filter{})
+		if err != nil || len(items) != 3 {
+			t.Errorf("%s: default %+v %v", names[0], items, err)
+		}
+		g, err := s.Senders(ctx, Filter{}, 0)
+		if err != nil || len(g) != 2 {
+			t.Errorf("%s: senders must skip own sent mail: %+v %v", names[0], g, err)
+		}
+	}
+}

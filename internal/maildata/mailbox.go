@@ -36,6 +36,8 @@ var roleByName = map[string]Role{
 	"спам":             RoleJunk,
 	"archive":          RoleArchive,
 	"all mail":         RoleAll,
+	"вся почта":        RoleAll,
+	"архив":            RoleArchive,
 }
 
 // Mailbox describes one row of the mailboxes table.

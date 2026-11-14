@@ -34,6 +34,7 @@ type walked struct {
 type Store struct {
 	root, accountsDB, version string
 	db                        *sql.DB
+	hasLabels                 bool // the index has Mail's labels table (Gmail labels)
 
 	mu        sync.Mutex
 	walkedDir map[string]bool
@@ -90,8 +91,13 @@ func Open(opt Options) (*Store, error) {
 	if err != nil {
 		return nil, wrapAccess(err, opt.MailRoot)
 	}
+	var n int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='labels'").Scan(&n); err != nil {
+		db.Close()
+		return nil, wrapAccess(err, opt.MailRoot)
+	}
 	return &Store{
-		root: opt.MailRoot, accountsDB: opt.AccountsDB, version: best, db: db,
+		root: opt.MailRoot, accountsDB: opt.AccountsDB, version: best, db: db, hasLabels: n > 0,
 		walkedDir: map[string]bool{}, walkCache: map[string]map[int64]walked{},
 	}, nil
 }

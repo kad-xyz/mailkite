@@ -31,6 +31,7 @@ CREATE TABLE message_global_data(ROWID INTEGER PRIMARY KEY AUTOINCREMENT, messag
 CREATE TABLE recipients(ROWID INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER, address INTEGER, type INTEGER, position INTEGER);
 CREATE TABLE attachments(ROWID INTEGER PRIMARY KEY AUTOINCREMENT, message INTEGER, attachment_id TEXT, name TEXT);
 CREATE TABLE summaries(ROWID INTEGER PRIMARY KEY AUTOINCREMENT, summary TEXT);
+CREATE TABLE labels(message_id INTEGER, mailbox_id INTEGER, PRIMARY KEY(message_id, mailbox_id)) WITHOUT ROWID;
 `
 
 const accountsSchema = `
@@ -50,6 +51,9 @@ type FixtureMsg struct {
 	Raw                                            []byte
 	Partial                                        bool
 	RemoteID                                       uint32 // messages.remote_id: the IMAP UID
+	// Labels are mailbox URLs the message also appears in without its own row,
+	// as Mail records Gmail labels (INBOX, Sent Mail) of a message stored in All Mail.
+	Labels []string
 	// External holds attachment files Mail stores outside a .partial.emlx,
 	// under Data/.../Attachments/<rowid>/<Part>/<Name>.
 	External []ExternalAttachment
@@ -209,9 +213,17 @@ func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
 	res, err := tx.Exec("INSERT INTO summaries(summary) VALUES(?)", "Fixture body for "+m.Subject)
 	must(err)
 	sum, _ := res.LastInsertId()
-	res, err = tx.Exec("INSERT INTO message_global_data(message_id, message_id_header) VALUES(0,?)", m.MessageID)
-	must(err)
-	gid, _ := res.LastInsertId()
+	// Mail keeps one message_global_data row per Message-ID, shared by its copies.
+	var gid int64
+	err = tx.QueryRow("SELECT ROWID FROM message_global_data WHERE message_id_header=?", m.MessageID).Scan(&gid)
+	newGlobal := err == sql.ErrNoRows
+	if newGlobal {
+		res, err = tx.Exec("INSERT INTO message_global_data(message_id, message_id_header) VALUES(0,?)", m.MessageID)
+		must(err)
+		gid, _ = res.LastInsertId()
+	} else {
+		must(err)
+	}
 
 	b2i := func(b bool) int {
 		if b {
@@ -229,12 +241,19 @@ func (f *Fixture) AddMessage(m FixtureMsg) (rowid int64) {
 		gid, gid, m.RemoteID, sender, "", subj, sum, ts, ts, mbox, b2i(m.Read), b2i(m.Flagged), b2i(m.Deleted), len(m.Raw), listHash, m.UnsubType)
 	must(err)
 	rowid, _ = res.LastInsertId()
-	_, err = tx.Exec("UPDATE message_global_data SET message_id=? WHERE ROWID=?", rowid, gid)
-	must(err)
+	if newGlobal {
+		_, err = tx.Exec("UPDATE message_global_data SET message_id=? WHERE ROWID=?", rowid, gid)
+		must(err)
+	}
 
 	for i, to := range m.To {
 		aid := lookup("SELECT ROWID FROM addresses WHERE address=? AND comment=''", "INSERT INTO addresses(address,comment) VALUES(?,'')", to)
 		_, err = tx.Exec("INSERT INTO recipients(message,address,type,position) VALUES(?,?,0,?)", rowid, aid, i)
+		must(err)
+	}
+	for _, lu := range m.Labels {
+		lid := lookup("SELECT ROWID FROM mailboxes WHERE url=?", "INSERT INTO mailboxes(url,total_count,unread_count) VALUES(?,0,0)", lu)
+		_, err = tx.Exec("INSERT INTO labels(message_id,mailbox_id) VALUES(?,?)", rowid, lid)
 		must(err)
 	}
 	for i, name := range m.Attachments {
